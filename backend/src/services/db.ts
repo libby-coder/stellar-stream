@@ -39,7 +39,24 @@ function migrate(): void {
       start_at        INTEGER NOT NULL,
       created_at      INTEGER NOT NULL,
       canceled_at     INTEGER,
-      completed_at    INTEGER
+      completed_at    INTEGER,
+      refunded_amount REAL,
+      archived_at     INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS stream_archive (
+      id              TEXT PRIMARY KEY,
+      sender          TEXT NOT NULL,
+      recipient       TEXT NOT NULL,
+      asset_code      TEXT NOT NULL,
+      total_amount    REAL NOT NULL,
+      duration_seconds INTEGER NOT NULL,
+      start_at        INTEGER NOT NULL,
+      created_at      INTEGER NOT NULL,
+      canceled_at     INTEGER,
+      completed_at    INTEGER,
+      refunded_amount REAL,
+      archived_at     INTEGER NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS stream_events (
@@ -73,6 +90,16 @@ function migrate(): void {
 
     CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_status ON webhook_deliveries(status);
     CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_next_retry ON webhook_deliveries(next_retry_at);
+
+    CREATE TABLE IF NOT EXISTS webhook_dead_letters (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      url             TEXT NOT NULL,
+      payload         TEXT NOT NULL,
+      last_error      TEXT,
+      failed_at       INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_webhook_dead_letters_failed_at ON webhook_dead_letters(failed_at);
 
     CREATE TABLE IF NOT EXISTS indexer_cursor (
       id TEXT PRIMARY KEY,
