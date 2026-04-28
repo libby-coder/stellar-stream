@@ -11,6 +11,8 @@ interface StreamsTableProps {
   filters: ListStreamsFilters;
   onFiltersChange: (f: ListStreamsFilters) => void;
   onCancel: (streamId: string) => Promise<void>;
+  onPause: (streamId: string) => Promise<void>;
+  onResume: (streamId: string) => Promise<void>;
   onOpenStream?: (streamId: string) => void;
   /**
    * Called when the user clicks "Edit" for a scheduled stream.
@@ -25,6 +27,7 @@ function statusClass(status: Stream["progress"]["status"]): string {
     case "scheduled": return "badge badge-scheduled";
     case "completed": return "badge badge-completed";
     case "canceled":  return "badge badge-canceled";
+    case "paused":    return "badge badge-paused";
     default:          return "badge";
   }
 }
@@ -32,6 +35,7 @@ function statusClass(status: Stream["progress"]["status"]): string {
 function formatTimestamp(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toLocaleString();
 }
+
 
 
   };
@@ -197,6 +201,8 @@ function formatTimestamp(unixSeconds: number): string {
                     healthBadges={healthBadges}
                     onToggleTimeline={toggleTimeline}
                     onCancel={onCancel}
+                    onPause={onPause}
+                    onResume={onResume}
                     onEditStartTime={onEditStartTime}
                     onOpenStream={onOpenStream}
                   />
@@ -280,6 +286,8 @@ interface StreamRowProps {
   healthBadges: ReturnType<typeof getHealthBadges>;
   onToggleTimeline: (id: string) => void;
   onCancel: (id: string) => Promise<void>;
+  onPause: (id: string) => Promise<void>;
+  onResume: (id: string) => Promise<void>;
   onEditStartTime: StreamsTableProps["onEditStartTime"];
   onOpenStream?: (streamId: string) => void;
 }
@@ -292,6 +300,8 @@ function StreamRow({
   healthBadges,
   onToggleTimeline,
   onCancel,
+  onPause,
+  onResume,
   onEditStartTime,
   onOpenStream,
 }: StreamRowProps) {
@@ -300,6 +310,8 @@ function StreamRow({
    * Passed to the modal so focus returns here when the modal closes.
    */
   const editBtnRef = useRef<HTMLButtonElement>(null);
+  const isPaused = stream.progress.status === "paused";
+  const isActive = stream.progress.status === "active";
 
   return (
     <>
@@ -376,6 +388,26 @@ function StreamRow({
                 onClick={() => onEditStartTime(stream, editBtnRef)}
               >
                 ✏️ Edit
+              </button>
+            )}
+            {isActive && (
+              <button
+                className="btn-ghost"
+                type="button"
+                aria-label={`Pause stream ${stream.id}`}
+                onClick={() => onPause(stream.id)}
+              >
+                ⏸ Pause
+              </button>
+            )}
+            {isPaused && (
+              <button
+                className="btn-ghost"
+                type="button"
+                aria-label={`Resume stream ${stream.id}`}
+                onClick={() => onResume(stream.id)}
+              >
+                ▶ Resume
               </button>
             )}
             <button

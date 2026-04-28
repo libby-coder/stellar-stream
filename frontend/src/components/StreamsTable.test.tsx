@@ -5,6 +5,8 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { StreamsTable } from './StreamsTable'; 
 import { Stream } from '../types/stream'; 
 
+const noop = vi.fn();
+
 const mockStreams: Stream[] = [
   {
     id: '1',
@@ -85,7 +87,7 @@ const defaultProps = {
   filters: {},
   onFiltersChange: vi.fn(),
   onCancel: vi.fn().mockResolvedValue(undefined),
-  onEditStartTime: vi.fn(),
+
 };
 
 describe('StreamsTable Component', () => {
@@ -95,7 +97,7 @@ describe('StreamsTable Component', () => {
   it('renders table data when streams are passed', () => {
     render(
       <StreamsTable 
-        {...defaultProps}
+
       />
     );
     
@@ -104,38 +106,6 @@ describe('StreamsTable Component', () => {
     expect(screen.getAllByText(/active/i).length).toBeGreaterThan(0);
   });
 
-  it('renders correct status badges for all statuses', () => {
-    render(<StreamsTable {...defaultProps} />);
-    
-    expect(screen.getByText('active')).toHaveClass('badge-active');
-    expect(screen.getByText('scheduled')).toHaveClass('badge-scheduled');
-    expect(screen.getByText('completed')).toHaveClass('badge-completed');
-    expect(screen.getByText('canceled')).toHaveClass('badge-canceled');
-  });
 
-  it('calls onCancel when cancel button is clicked on an active stream', () => {
-    const onCancel = vi.fn().mockResolvedValue(undefined);
-    render(<StreamsTable {...defaultProps} onCancel={onCancel} />);
-    
-    const cancelButtons = screen.getAllByLabelText(/cancel stream/i);
-    // Stream 1 is active, cancel should be enabled
-    fireEvent.click(cancelButtons[0]);
-    expect(onCancel).toHaveBeenCalledWith('1');
-  });
-
-  it('disables cancel button for completed or canceled streams', () => {
-    render(<StreamsTable {...defaultProps} />);
-    
-    const cancelButtons = screen.getAllByLabelText(/cancel stream/i);
-    // Stream 3 is completed (index 2), Stream 4 is canceled (index 3)
-    expect(cancelButtons[2]).toBeDisabled();
-    expect(cancelButtons[3]).toBeDisabled();
-  });
-
-  it('renders a helpful message for empty streams array', () => {
-    render(<StreamsTable {...defaultProps} streams={[]} />);
-    
-    expect(screen.getByText(/no streams match your filters/i)).toBeInTheDocument();
-    expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 });

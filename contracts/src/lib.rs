@@ -23,9 +23,7 @@ pub struct Stream {
     pub end_time: u64,
     pub cliff_seconds: u64,
     pub canceled: bool,
-    pub paused: bool,
-    pub pause_started_at: Option<u64>,
-    pub metadata: Option<Map<String, String>>,
+
 }
 
 // ---------------------------------------------------------------------------
@@ -78,24 +76,6 @@ pub struct StreamCanceled {
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StreamTransferred {
-    pub stream_id: u64,
-    pub old_recipient: Address,
-    pub new_recipient: Address,
-}
-
-/// Emitted when an admin claws back tokens from a stream for compliance purposes.
-#[contracttype]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClawbackExecuted {
-    pub stream_id: u64,
-    pub amount: i128,
-    pub recipient: Address,
-}
-
-// ---------------------------------------------------------------------------
-// Contract
-// ---------------------------------------------------------------------------
 
 #[contract]
 pub struct StellarStreamContract;
@@ -167,9 +147,7 @@ impl StellarStreamContract {
             end_time,
             cliff_seconds,
             canceled: false,
-            paused: false,
-            pause_started_at: None,
-            metadata: metadata.clone(),
+
         };
 
         env.storage()
@@ -393,12 +371,77 @@ impl StellarStreamContract {
         amount
     }
 
-    // -----------------------------------------------------------------------
-    // Cancel
-    // -----------------------------------------------------------------------
 
-    pub fn cancel(env: Env, stream_id: u64, sender: Address) {
         let mut stream = read_stream(&env, stream_id);
+        if stream.sender != sender {
+            panic!("sender mismatch");
+        }
+        sender.require_auth();
+
+        if stream.canceled {
+            panic!("stream is canceled");
+        }
+        if stream.paused_at != 0 {
+            panic!("stream is already paused");
+        }
+
+        let now = env.ledger().timestamp();
+        if now >= stream.end_time {
+            panic!("stream has already ended");
+        }
+
+        stream.paused_at = now;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Stream(stream_id), &stream);
+
+        env.events().publish(
+            (symbol_short!("Stream"), symbol_short!("Paused")),
+            StreamPaused {
+                stream_id,
+                sender,
+                paused_at: now,
+            },
+        );
+    }
+
+    pub fn resume(env: Env, stream_id: u64, sender: Address) {
+        let mut stream = read_stream(&env, stream_id);
+        if stream.sender != sender {
+            panic!("sender mismatch");
+        }
+        sender.require_auth();
+
+        if stream.canceled {
+            panic!("stream is canceled");
+        }
+        if stream.paused_at == 0 {
+            panic!("stream is not paused");
+        }
+
+        let now = env.ledger().timestamp();
+        let elapsed_pause = now - stream.paused_at;
+        stream.paused_duration += elapsed_pause;
+        // Extend end_time so the recipient doesn't lose vesting time.
+        stream.end_time += elapsed_pause;
+        stream.paused_at = 0;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Stream(stream_id), &stream);
+
+        env.events().publish(
+            (symbol_short!("Stream"), symbol_short!("Resumed")),
+            StreamResumed {
+                stream_id,
+                sender,
+                resumed_at: now,
+                paused_duration: stream.paused_duration,
+            },
+        );
+    }
+
+    pub fn cancel(env: Env, stream_id: u64, sender: Address) {        let mut stream = read_stream(&env, stream_id);
         if stream.sender != sender {
             panic!("sender mismatch");
         }
@@ -591,14 +634,15 @@ fn vested_amount(stream: &Stream, at_time: u64) -> i128 {
         return 0;
     }
 
-    if effective_at_time <= stream.start_time {
-        return 0;
-    }
 
-    let effective_time = if effective_at_time >= stream.end_time {
-        stream.end_time
     } else {
         effective_at_time
+    };
+
+    let effective_time = if effective_now >= stream.end_time {
+        stream.end_time
+    } else {
+        effective_now
     };
 
     let elapsed = effective_time - stream.start_time;

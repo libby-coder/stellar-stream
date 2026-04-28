@@ -20,6 +20,8 @@ import {
   createStream,
   listOpenIssues,
   listStreams,
+  pauseStream,
+  resumeStream,
   updateStreamStartAt,
 } from "./services/api";
 import { ListStreamsFilters } from "./services/api";
@@ -177,6 +179,7 @@ function App() {
   }
 
 
+
   return (
     <div className="app-shell">
       <header className="hero">
@@ -281,6 +284,8 @@ function App() {
                 setFilter("assetCode", next.asset ?? defaultStreamFilters.assetCode);
               }}
               onCancel={handleCancel}
+              onPause={handlePause}
+              onResume={handleResume}
               onEditStartTime={(stream, triggerRef) =>
                 setEditingStream({ stream, triggerRef })
               }
