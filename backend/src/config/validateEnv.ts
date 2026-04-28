@@ -48,13 +48,7 @@ const envSchema = z.object({
   SERVER_SIGNING_KEY: z.string().optional(),
   DOMAIN: z.string().optional().default("localhost"),
   SOROBAN_DISABLED: z.string().optional(),
-  AUTH_CHALLENGE_RATE_LIMIT: z
-    .string()
-    .transform((val: string) => parseInt(val, 10))
-    .refine((val: number) => !isNaN(val) && val > 0, {
-      message: "must be a positive integer",
-    })
-    .optional(),
+
 });
 
 export interface ValidatedConfig {
@@ -71,7 +65,7 @@ export interface ValidatedConfig {
   jwtSecret: string;
   serverSigningKey: string | null;
   domain: string;
-  authChallengeRateLimit: number | null;
+
 }
 
 export function validateEnv(): ValidatedConfig {
@@ -203,6 +197,6 @@ export function validateEnv(): ValidatedConfig {
     jwtSecret: env.JWT_SECRET,
     serverSigningKey: env.SERVER_SIGNING_KEY || null,
     domain: env.DOMAIN,
-    authChallengeRateLimit: env.AUTH_CHALLENGE_RATE_LIMIT ?? null,
+
   };
 }
