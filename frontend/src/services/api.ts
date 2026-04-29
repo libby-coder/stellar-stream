@@ -176,3 +176,19 @@ export async function getStream(streamId: string): Promise<Stream> {
   const body = await parseResponse<{ data: Stream }>(response);
   return body.data;
 }
+
+export interface MetricsHistoryParams {
+  startTimestamp: number;
+  endTimestamp: number;
+}
+
+export async function fetchMetricsHistory(params: MetricsHistoryParams): Promise<any[]> {
+  const searchParams = new URLSearchParams({
+    start: params.startTimestamp.toString(),
+    end: params.endTimestamp.toString(),
+  });
+  
+  const response = await fetch(`${API_BASE}/metrics/history?${searchParams}`);
+  const body = await parseResponse<{ data: any[] }>(response);
+  return body.data;
+}
