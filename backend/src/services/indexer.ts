@@ -28,7 +28,7 @@ export enum CircuitState {
   HALF_OPEN = "HALF_OPEN",
 }
 
-class CircuitBreaker {
+export class CircuitBreaker {
   private state: CircuitState = CircuitState.CLOSED;
   private failureCount: number = 0;
   private lastFailureTime: number = 0;
@@ -159,8 +159,16 @@ async function indexEvents(): Promise<void> {
     const currentLedger = latestLedger.sequence;
 
     if (lastProcessedLedger === 0) {
-
-        }
+      let cursorRow: any = null;
+      try {
+        cursorRow = db.prepare("SELECT last_ledger FROM indexer_cursor WHERE id = ?").get(contractId);
+        if (cursorRow) lastProcessedLedger = cursorRow.last_ledger;
+      } catch (e) {
+        cursorRow = db.prepare("SELECT last_ledger_sequence FROM indexer_cursor WHERE id = 1").get();
+        if (cursorRow) lastProcessedLedger = cursorRow.last_ledger_sequence;
+      }
+      if (lastProcessedLedger === 0) {
+        lastProcessedLedger = indexerStartLedger !== null ? indexerStartLedger : currentLedger;
       }
     }
 
@@ -191,7 +199,11 @@ async function indexEvents(): Promise<void> {
       }
 
       lastProcessedLedger = currentLedger;
-
+      try {
+        db.prepare("INSERT INTO indexer_cursor (id, last_ledger) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET last_ledger = excluded.last_ledger").run(contractId, currentLedger);
+      } catch (e) {
+        db.prepare("INSERT INTO indexer_cursor (id, last_ledger_sequence) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET last_ledger_sequence = excluded.last_ledger_sequence").run(currentLedger);
+      }
     })();
 
     ledgersScannedTotal.inc(currentLedger - startLedger);
