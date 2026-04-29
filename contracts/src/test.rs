@@ -316,6 +316,35 @@ fn test_cancel_recipient_cannot_claim_beyond_vested_at_cancel_time() {
 }
 
 #[test]
+fn test_cancel_after_partial_claim_refunds_correct_amount_and_preserves_token_conservation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, StellarStreamContract);
+    let client = StellarStreamContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = create_token(&env, &admin);
+    let token_admin = token::StellarAssetClient::new(&env, &token);
+    token_admin.mint(&sender, &1000);
+
+    let stream_id = client.create_stream(&sender, &recipient, &token, &1000, &0, &1000, &0, &None);
+    env.ledger().with_mut(|l| l.timestamp = 500);
+    client.claim(&stream_id, &recipient, &300);
+    env.ledger().with_mut(|l| l.timestamp = 700);
+    client.cancel(&stream_id, &sender);
+
+    let token_client = token::Client::new(&env, &token);
+    assert_eq!(token_client.balance(&sender), 300);
+    assert_eq!(token_client.balance(&recipient), 300);
+    assert_eq!(client.claimable(&stream_id, &9999), 400);
+
+    let stream = client.get_stream(&stream_id);
+    assert_snapshot!("stream_cancel_after_partial_claim", stream);
+    assert_eq!(300 + 300 + 400, 1000);
+}
+
+#[test]
 #[should_panic(expected = "sender mismatch")]
 fn test_cancel_fails_with_wrong_sender() {
     let env = Env::default();
@@ -1175,7 +1204,10 @@ fn test_clawback_emits_event() {
     let client = StellarStreamContractClient::new(&env, &contract_id);
 
     let token_admin = Address::generate(&env);
-    let compliance_admin = Address::generate(&env);
+    let compliance_admin = Address::from_string(&String::from_str(
+        &env,
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+    ));
     let sender = Address::generate(&env);
     let recipient = Address::generate(&env);
     let token = create_token(&env, &token_admin);
@@ -1201,6 +1233,39 @@ fn test_clawback_emits_event() {
     assert_eq!(event_data.stream_id, stream_id);
     assert_eq!(event_data.amount, 250);
     assert_eq!(event_data.recipient, compliance_admin);
+    assert_snapshot!("clawback_executed_event", event_data);
+}
+
+#[test]
+fn test_clawback_after_canceled_stream_transfers_to_admin() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, StellarStreamContract);
+    let client = StellarStreamContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let compliance_admin = Address::generate(&env);
+    let sender = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let token = create_token(&env, &token_admin);
+    let token_mint = token::StellarAssetClient::new(&env, &token);
+    token_mint.mint(&sender, &1000);
+
+    client.initialize(&compliance_admin, &Address::generate(&env));
+    let stream_id = client.create_stream(
+        &sender, &recipient, &token, &1000, &0, &1000, &None,
+    );
+
+    env.ledger().with_mut(|l| l.timestamp = 400);
+    client.cancel(&stream_id, &sender);
+
+    env.ledger().with_mut(|l| l.timestamp = 500);
+    let clawed = client.clawback(&stream_id, &200, &compliance_admin);
+
+    assert_eq!(clawed, 200);
+    let token_client = token::Client::new(&env, &token);
+    assert_eq!(token_client.balance(&compliance_admin), 200);
+    assert_eq!(client.claimable(&stream_id, &500), 200);
 }
 
 /// Token conservation: recipient claims + admin clawback = total vested at clawback time.

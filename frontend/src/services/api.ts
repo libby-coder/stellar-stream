@@ -1,5 +1,15 @@
 import { CreateStreamPayload, OpenIssue, Stream } from "../types/stream";
 
+type CacheEntry<T> = {
+  data: T;
+  timestamp: number;
+  promise?: Promise<T>; // prevents duplicate fetches
+};
+
+const cache = new Map<string, CacheEntry<any>>();
+
+const DEFAULT_STALE_AFTER_MS = 4000;
+
 const API_BASE = import.meta.env.VITE_API_URL ?? "/api";
 
 let authToken: string | null = null;
@@ -47,6 +57,52 @@ async function parseResponse<T>(response: Response): Promise<T> {
   return body as T;
 }
 
+async function fetchWithCache<T>(
+  key: string,
+  fetcher: () => Promise<T>,
+  staleAfterMs: number = DEFAULT_STALE_AFTER_MS
+): Promise<T> {
+  const now = Date.now();
+  const cached = cache.get(key);
+
+  // ✅ Fresh cache → return immediately
+  if (cached && now - cached.timestamp < staleAfterMs) {
+    return cached.data;
+  }
+
+  // ✅ Stale cache → return immediately + refresh in background
+  if (cached) {
+    if (!cached.promise) {
+      cached.promise = fetcher()
+        .then((freshData) => {
+          cache.set(key, {
+            data: freshData,
+            timestamp: Date.now(),
+          });
+          return freshData;
+        })
+        .finally(() => {
+          const updated = cache.get(key);
+          if (updated) delete updated.promise;
+        });
+    }
+
+    return cached.data;
+  }
+
+  // ❗ No cache → fetch normally
+  const promise = fetcher();
+  const data = await promise;
+
+  cache.set(key, {
+    data,
+    timestamp: now,
+  });
+
+  return data;
+}
+
+
 export interface ListStreamsFilters {
   recipient?: string;
   sender?: string;
@@ -62,11 +118,15 @@ export async function listStreams(filters?: ListStreamsFilters): Promise<Stream[
   if (filters?.status) params.set("status", filters.status);
   if (filters?.asset) params.set("asset", filters.asset);
   if (filters?.q) params.set("q", filters.q);
+
   const q = params.toString();
   const url = q ? `${API_BASE}/streams?${q}` : `${API_BASE}/streams`;
-  const response = await fetch(url);
-  const body = await parseResponse<{ data: Stream[] }>(response);
-  return body.data;
+
+  return fetchWithCache(url, async () => {
+    const response = await fetch(url);
+    const body = await parseResponse<{ data: Stream[] }>(response);
+    return body.data;
+  });
 }
 
 export async function listRecipientStreams(accountId: string): Promise<Stream[]> {
@@ -200,9 +260,13 @@ export async function listAllEvents(): Promise<StreamEvent[]> {
 }
 
 export async function getStream(streamId: string): Promise<Stream> {
-  const response = await fetch(`${API_BASE}/streams/${encodeURIComponent(streamId)}`);
-  const body = await parseResponse<{ data: Stream }>(response);
-  return body.data;
+  const url = `${API_BASE}/streams/${encodeURIComponent(streamId)}`;
+
+  return fetchWithCache(url, async () => {
+    const response = await fetch(url);
+    const body = await parseResponse<{ data: Stream }>(response);
+    return body.data;
+  });
 }
 
 export interface MetricsHistoryParams {
@@ -220,3 +284,8 @@ export async function fetchMetricsHistory(params: MetricsHistoryParams): Promise
   const body = await parseResponse<{ data: any[] }>(response);
   return body.data;
 }
+
+export function clearCache() {
+  cache.clear();
+}
+
