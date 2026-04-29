@@ -56,6 +56,9 @@ export function useClaimStream(
       // Block concurrent claims
       if (claimState.status === "pending") return;
 
+      // Early return for zero amount to prevent unnecessary API calls
+      if (amount === 0) return;
+
       const claimId = ++claimIdRef.current;
 
       setClaimState({ streamId, status: "pending", error: null });
