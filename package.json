@@ -10,11 +10,24 @@
     "build": "cd backend && npm run build && cd ../frontend && npm run build",
     "deploy:contract": "./scripts/deploy.sh",
     "gen:bindings": "./scripts/generate-contract-bindings.sh",
-    "changelog:update": "conventional-changelog -p angular -i CHANGELOG.md -s"
+    "changelog:update": "conventional-changelog -p angular -i CHANGELOG.md -s",
+    "prepare": "husky"
   },
   "license": "MIT",
+  "lint-staged": {
+    "**/*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ]
+  },
   "devDependencies": {
-    "conventional-changelog-cli": "^2.2.2"
+    "@eslint/js": "^10.0.1",
+    "conventional-changelog-cli": "^2.2.2",
+    "eslint": "^10.4.0",
+    "globals": "^17.6.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
+    "prettier": "^3.8.3",
+    "typescript-eslint": "^8.60.0"
   }
 }
-
