@@ -522,18 +522,21 @@ The backend validates all environment variables **at startup**. If a required va
 
 ### Backend variables
 
-| Variable                  | Required                                 | Default                                   | Description                                                             |
-| ------------------------- | ---------------------------------------- | ----------------------------------------- | ----------------------------------------------------------------------- |
-| `SOROBAN_DISABLED`        | No                                       | `false`                                   | Set to `"true"` to skip Soroban checks and run off-chain                |
-| `CONTRACT_ID`             | **Yes** (unless `SOROBAN_DISABLED=true`) | —                                         | Soroban contract ID from deployment (56 chars, starts with `C`)         |
-| `SERVER_PRIVATE_KEY`      | **Yes** (unless `SOROBAN_DISABLED=true`) | —                                         | Stellar secret key for signing transactions (56 chars, starts with `S`) |
-| `PORT`                    | No                                       | `3001`                                    | Port the Express API listens on                                         |
-| `RPC_URL`                 | No                                       | `https://soroban-testnet.stellar.org:443` | Soroban RPC endpoint                                                    |
-| `NETWORK_PASSPHRASE`      | No                                       | `Test SDF Network ; September 2015`       | Stellar network passphrase                                              |
-| `ALLOWED_ASSETS`          | No                                       | `USDC,XLM`                                | Comma-separated list of allowed asset codes                             |
-| `DB_PATH`                 | No                                       | `backend/data/streams.db`                 | Path to the SQLite database file                                        |
-| `WEBHOOK_DESTINATION_URL` | No                                       | —                                         | HTTP(S) URL for stream lifecycle webhook delivery                       |
-| `WEBHOOK_SIGNING_SECRET`  | No                                       | —                                         | Secret for HMAC-SHA256 webhook payload signing                          |
+| Variable                    | Required                                 | Default                                   | Description                                                             |
+| --------------------------- | ---------------------------------------- | ----------------------------------------- | ----------------------------------------------------------------------- |
+| `SOROBAN_DISABLED`          | No                                       | `false`                                   | Set to `"true"` to skip Soroban checks and run off-chain                |
+| `CONTRACT_ID`               | **Yes** (unless `SOROBAN_DISABLED=true`) | —                                         | Soroban contract ID from deployment (56 chars, starts with `C`)         |
+| `SERVER_PRIVATE_KEY`        | **Yes** (unless `SOROBAN_DISABLED=true`) | —                                         | Stellar secret key for signing transactions (56 chars, starts with `S`) |
+| `PORT`                      | No                                       | `3001`                                    | Port the Express API listens on                                         |
+| `RPC_URL`                   | No                                       | `https://soroban-testnet.stellar.org:443` | Soroban RPC endpoint                                                    |
+| `NETWORK_PASSPHRASE`        | No                                       | `Test SDF Network ; September 2015`       | Stellar network passphrase                                              |
+| `ALLOWED_ASSETS`            | No                                       | `USDC,XLM`                                | Comma-separated list of allowed asset codes                             |
+| `DB_PATH`                   | No                                       | `backend/data/streams.db`                 | Path to the SQLite database file                                        |
+| `WEBHOOK_DESTINATION_URL`   | No                                       | —                                         | HTTP(S) URL for stream lifecycle webhook delivery                       |
+| `WEBHOOK_SIGNING_SECRET`    | No                                       | —                                         | Secret for HMAC-SHA256 webhook payload signing                          |
+| `AUTH_CHALLENGE_RATE_LIMIT` | No                                       | `10`                                      | Rate limit for auth challenge endpoint (requests per minute)            |
+| `READ_RATE_LIMIT`           | No                                       | `120`                                     | Rate limit for read endpoints (requests per minute per IP)              |
+| `MUTATION_RATE_LIMIT`       | No                                       | `10`                                      | Rate limit for mutation endpoints (requests per minute per IP)          |
 
 ### Frontend variables
 
@@ -561,6 +564,41 @@ const valid = timingSafeEqual(Buffer.from(expected), Buffer.from(received));
 ```
 
 If `WEBHOOK_DESTINATION_URL` is set without `WEBHOOK_SIGNING_SECRET`, webhooks are delivered unsigned and a warning is logged at startup.
+
+### Rate limiting
+
+The API implements per-IP rate limiting on read and mutation endpoints:
+
+**Read endpoints** (120 requests/minute per IP):
+
+- `GET /api/streams`
+- `GET /api/streams/:id`
+- `GET /api/streams/:id/history`
+- `GET /api/streams/:id/snapshot`
+- `GET /api/recipients/:accountId/streams`
+- `GET /api/senders/:accountId/streams`
+- `GET /api/events`
+- `GET /api/streams/export.csv`
+
+**Mutation endpoints** (10 requests/minute per IP):
+
+- `POST /api/streams` (create)
+- `POST /api/streams/:id/cancel` (cancel)
+- `POST /api/streams/:id/pause` (pause)
+- `POST /api/streams/:id/resume` (resume)
+- `POST /api/streams/:id/claim` (claim)
+
+When a rate limit is exceeded, the API returns:
+
+- **Status:** `429 Too Many Requests`
+- **Header:** `Retry-After: <seconds>` (time until limit resets)
+- **Body:** Error response with `code: "RATE_LIMIT_EXCEEDED"`
+
+Limits are configurable via environment variables:
+
+- `READ_RATE_LIMIT` (default: 120 requests/minute)
+- `MUTATION_RATE_LIMIT` (default: 10 requests/minute)
+- `AUTH_CHALLENGE_RATE_LIMIT` (default: 10 requests/minute)
 
 ### Startup validation behaviour
 

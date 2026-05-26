@@ -889,4 +889,65 @@ describe("Backend Integration Tests", () => {
       });
     });
   });
+
+  describe("Rate Limiting", () => {
+    it("should enforce mutation rate limit on POST /api/streams", async () => {
+      const sender = Keypair.random().publicKey();
+      const recipient = Keypair.random().publicKey();
+
+      const payload = {
+        sender,
+        recipient,
+        assetCode: "USDC",
+        totalAmount: 1000,
+        durationSeconds: 3600,
+      };
+
+      // Make 11 requests (limit is 10 per minute)
+      for (let i = 0; i < 11; i++) {
+        const response = await request(app)
+          .post("/api/streams")
+          .send(payload);
+
+        if (i < 10) {
+          // First 10 should succeed or fail with auth error (no token), not rate limit
+          expect([200, 201, 401, 400]).toContain(response.status);
+        } else {
+          // 11th should be rate limited
+          expect(response.status).toBe(429);
+          expect(response.body.code).toBe("RATE_LIMIT_EXCEEDED");
+          expect(response.headers["retry-after"]).toBeDefined();
+        }
+      }
+    });
+
+    it("should return Retry-After header on rate limit", async () => {
+      const sender = Keypair.random().publicKey();
+      const recipient = Keypair.random().publicKey();
+
+      const payload = {
+        sender,
+        recipient,
+        assetCode: "USDC",
+        totalAmount: 1000,
+        durationSeconds: 3600,
+      };
+
+      // Make requests to hit the limit
+      for (let i = 0; i < 11; i++) {
+        await request(app).post("/api/streams").send(payload);
+      }
+
+      // 11th request should have Retry-After header
+      const response = await request(app)
+        .post("/api/streams")
+        .send(payload);
+
+      expect(response.status).toBe(429);
+      expect(response.headers["retry-after"]).toBeDefined();
+      const retryAfter = parseInt(response.headers["retry-after"], 10);
+      expect(retryAfter).toBeGreaterThan(0);
+      expect(retryAfter).toBeLessThanOrEqual(60);
+    });
+  });
 });
