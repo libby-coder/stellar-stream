@@ -158,12 +158,6 @@ async function indexEvents(): Promise<void> {
     const latestLedger = await rpcServer.getLatestLedger();
     const currentLedger = latestLedger.sequence;
 
-    if (lastProcessedLedger === 0) {
-
-        }
-      }
-    }
-
     if (currentLedger <= lastProcessedLedger) {
       circuitBreaker.onSuccess();
       return;
@@ -191,7 +185,6 @@ async function indexEvents(): Promise<void> {
       }
 
       lastProcessedLedger = currentLedger;
-
     })();
 
     ledgersScannedTotal.inc(currentLedger - startLedger);

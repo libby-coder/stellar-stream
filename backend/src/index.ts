@@ -189,9 +189,6 @@ app.get("/api/assets", (_req: Request, res: Response) => {
   });
 });
 
-
-});
-
 app.get("/api/streams", (req: Request, res: Response) => {
   const parsedQuery = listStreamsQuerySchema.safeParse(req.query);
   if (!parsedQuery.success) {
@@ -495,7 +492,9 @@ app.get("/api/auth/challenge", authChallengeLimiter, (req: Request, res: Respons
     const challengeTransaction = generateChallenge(accountId.trim());
     res.json({ transaction: challengeTransaction });
   } catch (error: any) {
-
+    console.error("Failed to generate challenge:", error);
+    sendApiError(req, res, 500, "Failed to generate authentication challenge.", {
+      code: "AUTH_ERROR",
     });
   }
 });
@@ -513,7 +512,9 @@ app.post("/api/auth/token", async (req: Request, res: Response) => {
     const token = await verifyChallengeAndIssueToken(transaction);
     res.json({ token });
   } catch (error: any) {
-
+    console.error("Failed to verify challenge:", error);
+    sendApiError(req, res, 400, error.message || "Challenge verification failed.", {
+      code: "AUTH_ERROR",
     });
   }
 });
@@ -745,7 +746,8 @@ app.patch(
     }
 
     const user = (req as any).user;
-
+    if (user.accountId !== existingStream.sender) {
+      sendApiError(req, res, 403, "Only the sender can update the stream start time.", {
         code: "FORBIDDEN",
       });
       return;
@@ -757,7 +759,17 @@ app.patch(
       return;
     }
 
-
+    try {
+      const updatedStream = updateStreamStartAt(parsedId.value, parsedBody.data.startAt);
+      res.json({
+        data: {
+          ...updatedStream,
+          progress: calculateProgress(updatedStream),
+        },
+      });
+    } catch (error: any) {
+      console.error("Failed to update stream start time:", error);
+      const normalizedError = normalizeUnknownApiError(error, "Failed to update stream start time.");
       sendApiError(req, res, normalizedError.statusCode, normalizedError.message, {
         code: normalizedError.code ?? "INTERNAL_ERROR",
       });
