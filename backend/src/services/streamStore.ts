@@ -398,10 +398,7 @@ export function calculateProgress(
     stream.pausedAt !== undefined ? Math.min(at, stream.pausedAt) : at;
 
   const elapsed = Math.max(0, Math.min(effectiveAt, effectiveEnd) - stream.startAt);
-      ?Math.min(stream.canceledAt, streamEnd + pausedDuration)
-      : streamEnd + pausedDuration;
 
-  const elapsed = Math.max(0, Math.min(at, effectiveEnd) - stream.startAt - pausedDuration);
   const ratio = Math.min(1, elapsed / stream.durationSeconds);
   const vestedAmount = stream.totalAmount * ratio;
 
@@ -413,6 +410,46 @@ export function calculateProgress(
     remainingAmount: round(Math.max(0, stream.totalAmount - vestedAmount)),
     percentComplete: round(ratio * 100),
   };
+}
+
+export async function getOnChainClaimableAmount(
+  id: string,
+): Promise<{ claimableAmount: number; at: number }> {
+  const sorobanContext = getSorobanContext();
+  if (!sorobanContext || !rpcServer) {
+    throw new Error("Soroban RPC server is not initialized.");
+  }
+
+  const sourceAccount = await sorobanContext.sourceAccountPromise;
+  const latestLedger = await rpcServer.getLatestLedger();
+  const at = latestLedger.closeTime ? parseInt(latestLedger.closeTime, 10) : Math.floor(Date.now() / 1000);
+
+  const simRes = await simulateContractCall(
+    sorobanContext.contract,
+    sourceAccount,
+    "claimable",
+    nativeToScVal(parseInt(id), { type: "u64" }),
+    nativeToScVal(at, { type: "u64" }),
+  );
+
+  if (!rpc.Api.isSimulationSuccess(simRes) || !simRes.result) {
+    throw new Error("Simulation failed: " + JSON.stringify(simRes));
+  }
+
+  const claimableAmount = Number(scValToNative(simRes.result.retval));
+  return { claimableAmount, at };
+}
+
+export async function getLatestLedgerTime(): Promise<number> {
+  if (!rpcServer) {
+    return Math.floor(Date.now() / 1000);
+  }
+  try {
+    const latestLedger = await rpcServer.getLatestLedger();
+    return latestLedger.closeTime ? parseInt(latestLedger.closeTime, 10) : Math.floor(Date.now() / 1000);
+  } catch (e) {
+    return Math.floor(Date.now() / 1000);
+  }
 }
 
 export async function syncStreams() {
@@ -968,64 +1005,7 @@ export async function cancelStream(
   return stream;
 }
 
-export function pauseStream(id: string): StreamRecord {
-  const stream = getStream(id);
-  if (!stream) {
-    const err: any = new Error("Stream not found.");
-    err.statusCode = 404;
-    throw err;
-  }
-
-  const status = computeStatus(stream, nowInSeconds());
-  if (status !== "active") {
-    const err: any = new Error("Only active streams can be paused.");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  stream.pausedAt = nowInSeconds();
-  const db = getDb();
-  db.transaction(() => {
-    upsertStream(stream);
-    recordEventWithDb(db, stream.id, "paused", stream.pausedAt!, stream.sender);
-  })();
-
-  triggerWebhook("paused", stream);
-  return stream;
-}
-
-export function resumeStream(id: string): StreamRecord {
-  const stream = getStream(id);
-  if (!stream) {
-    const err: any = new Error("Stream not found.");
-    err.statusCode = 404;
-    throw err;
-  }
-
-  if (stream.pausedAt === undefined) {
-    const err: any = new Error("Stream is not paused.");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const now = nowInSeconds();
-  const elapsed = now - stream.pausedAt;
-  stream.pausedDuration = (stream.pausedDuration ?? 0) + elapsed;
-  // Extend the effective duration so the recipient doesn't lose vesting time.
-  stream.durationSeconds += elapsed;
-  stream.pausedAt = undefined;
-
-  const db = getDb();
-  db.transaction(() => {
-    upsertStream(stream);
-    recordEventWithDb(db, stream.id, "resumed", now, stream.sender, undefined, {
-      pausedDuration: stream.pausedDuration,
-    });
-  })();
-
-  triggerWebhook("resumed", stream);
-  return stream;
-}
+// Duplicate pauseStream and resumeStream functions removed
 
 export function updateStreamStartAt(id: string,
   newStartAt: number,

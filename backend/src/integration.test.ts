@@ -1,10 +1,32 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import { app } from "./index";
 import { initDb, getDb } from "./services/db";
 import { Keypair } from "@stellar/stellar-sdk";
 import path from "path";
 import fs from "fs";
+
+const mockSimulateTransaction = vi.fn();
+const mockGetLatestLedger = vi.fn();
+
+vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@stellar/stellar-sdk")>();
+  return {
+    ...actual,
+    rpc: {
+      ...actual.rpc,
+      Server: vi.fn().mockImplementation(() => ({
+        getLatestLedger: mockGetLatestLedger,
+        simulateTransaction: mockSimulateTransaction,
+        prepareTransaction: vi.fn().mockImplementation((tx) => tx),
+      })),
+      Api: {
+        ...actual.rpc.Api,
+        isSimulationSuccess: (response: any) => response.kind === "success",
+      }
+    },
+  };
+});
 
 
 // Use a separate test database
@@ -412,6 +434,118 @@ describe("Backend Integration Tests", () => {
 
         expect(response.status).toBe(400);
         expect(response.body.error).toContain("Stream ID must be");
+      });
+    });
+
+    describe("GET /api/streams/:id/claimable", () => {
+      beforeEach(() => {
+        vi.clearAllMocks();
+      });
+
+      it("should return 200 and the claimable amount from Soroban simulation", async () => {
+        mockGetLatestLedger.mockResolvedValue({
+          sequence: 12345,
+          closeTime: "1716812160",
+        });
+
+        mockSimulateTransaction.mockResolvedValue({
+          kind: "success",
+          result: {
+            retval: 450,
+          },
+        });
+
+        const response = await request(app).get(`/api/streams/${mockStream.id}/claimable`);
+
+        expect(response.status).toBe(200);
+        expect(response.body).toEqual({
+          streamId: mockStream.id,
+          claimableAmount: 450,
+          assetCode: mockStream.assetCode,
+          at: 1716812160,
+        });
+
+        expect(mockGetLatestLedger).toHaveBeenCalled();
+        expect(mockSimulateTransaction).toHaveBeenCalled();
+      });
+
+      it("should return 0 when stream is paused", async () => {
+        const db = getDb();
+        db.prepare("UPDATE streams SET paused_at = ? WHERE id = ?").run(Math.floor(Date.now() / 1000) - 1000, mockStream.id);
+
+        mockGetLatestLedger.mockResolvedValue({
+          sequence: 12345,
+          closeTime: "1716812160",
+        });
+
+        const response = await request(app).get(`/api/streams/${mockStream.id}/claimable`);
+
+        expect(response.status).toBe(200);
+        expect(response.body).toEqual({
+          streamId: mockStream.id,
+          claimableAmount: 0,
+          assetCode: mockStream.assetCode,
+          at: 1716812160,
+        });
+
+        expect(mockSimulateTransaction).not.toHaveBeenCalled();
+      });
+
+      it("should return 0 when stream is canceled", async () => {
+        const db = getDb();
+        db.prepare("UPDATE streams SET canceled_at = ? WHERE id = ?").run(Math.floor(Date.now() / 1000) - 1000, mockStream.id);
+
+        mockGetLatestLedger.mockResolvedValue({
+          sequence: 12345,
+          closeTime: "1716812160",
+        });
+
+        const response = await request(app).get(`/api/streams/${mockStream.id}/claimable`);
+
+        expect(response.status).toBe(200);
+        expect(response.body).toEqual({
+          streamId: mockStream.id,
+          claimableAmount: 0,
+          assetCode: mockStream.assetCode,
+          at: 1716812160,
+        });
+
+        expect(mockSimulateTransaction).not.toHaveBeenCalled();
+      });
+
+      it("should return 404 for non-existent stream", async () => {
+        const response = await request(app).get("/api/streams/999/claimable");
+
+        expect(response.status).toBe(404);
+        expect(response.body.error).toBe("Stream not found.");
+      });
+
+      it("should return 400 for invalid stream ID", async () => {
+        const response = await request(app).get("/api/streams/invalid-id/claimable");
+
+        expect(response.status).toBe(400);
+        expect(response.body.error).toContain("Stream ID must be");
+      });
+
+      it("should enforce rate limit of 30 requests per minute", async () => {
+        mockGetLatestLedger.mockResolvedValue({
+          sequence: 12345,
+          closeTime: "1716812160",
+        });
+        mockSimulateTransaction.mockResolvedValue({
+          kind: "success",
+          result: { retval: 10 },
+        });
+
+        for (let i = 0; i < 31; i++) {
+          const response = await request(app).get(`/api/streams/${mockStream.id}/claimable`);
+          if (i < 30) {
+            expect(response.status).toBe(200);
+          } else {
+            expect(response.status).toBe(429);
+            expect(response.body.code).toBe("RATE_LIMIT_EXCEEDED");
+          }
+        }
       });
     });
 

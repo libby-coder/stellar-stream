@@ -34,6 +34,8 @@ import {
   cancelStream,
   createStream,
   getStream,
+  getOnChainClaimableAmount,
+  getLatestLedgerTime,
   initSoroban,
   listStreams,
   listStreamsByRecipient,
@@ -171,6 +173,25 @@ const readLimiter = rateLimit({
 const mutationLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: MUTATION_RATE_LIMIT,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req: Request, res: Response) => {
+    const resetTime = (req as any).rateLimit?.resetTime;
+    const retryAfter = resetTime
+      ? Math.ceil((resetTime.getTime() - Date.now()) / 1000)
+      : 60;
+    res.set("Retry-After", String(Math.max(1, retryAfter)));
+    sendApiError(req, res, 429, "Too many requests. Please try again later.", {
+      code: "RATE_LIMIT_EXCEEDED",
+    });
+  },
+});
+
+const CLAIMABLE_RATE_LIMIT = Number(process.env.CLAIMABLE_RATE_LIMIT ?? 30);
+
+const claimableLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: CLAIMABLE_RATE_LIMIT,
   standardHeaders: true,
   legacyHeaders: false,
   handler: (req: Request, res: Response) => {
@@ -414,6 +435,47 @@ app.get("/api/streams/:id", readLimiter, (req: Request, res: Response) => {
       progress: calculateProgress(stream)
     }
   });
+});
+
+app.get("/api/streams/:id/claimable", claimableLimiter, async (req: Request, res: Response) => {
+  const parsedId = parseStreamId(req.params.id);
+  if (!parsedId.ok) {
+    sendValidationError(req, res, parsedId.issues);
+    return;
+  }
+
+  const stream = getStream(parsedId.value);
+  if (!stream) {
+    sendApiError(req, res, 404, "Stream not found.", { code: "NOT_FOUND" });
+    return;
+  }
+
+  try {
+    if (stream.pausedAt !== undefined || stream.canceledAt !== undefined) {
+      const at = await getLatestLedgerTime();
+      res.json({
+        streamId: stream.id,
+        claimableAmount: 0,
+        assetCode: stream.assetCode,
+        at,
+      });
+      return;
+    }
+
+    const { claimableAmount, at } = await getOnChainClaimableAmount(stream.id);
+    res.json({
+      streamId: stream.id,
+      claimableAmount: Number(claimableAmount),
+      assetCode: stream.assetCode,
+      at,
+    });
+  } catch (error: any) {
+    console.error("Failed to query claimable amount:", error);
+    const normalizedError = normalizeUnknownApiError(error, "Failed to query claimable amount.");
+    sendApiError(req, res, normalizedError.statusCode, normalizedError.message, {
+      code: normalizedError.code ?? "INTERNAL_ERROR",
+    });
+  }
 });
 
 app.get("/api/recipients/:accountId/streams", readLimiter, (req: Request, res: Response) => {
