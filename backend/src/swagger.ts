@@ -694,6 +694,61 @@ export const swaggerDocument = {
         },
       },
     },
+    "/api/streams/{id}/claimable": {
+      get: {
+        summary: "Get real-time claimable amount",
+        description: "Retrieves the current real-time claimable amount for a stream using Soroban contract simulation. Returns 0 if paused, canceled, or before the cliff.",
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            description: "The unique ID of the stream.",
+            schema: {
+              type: "string",
+            },
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Real-time claimable amount and query context.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    streamId: { type: "string", example: "1" },
+                    claimableAmount: { type: "number", example: 450.123456 },
+                    assetCode: { type: "string", example: "USDC" },
+                    at: { type: "integer", description: "Ledger timestamp at which query was simulated", example: 1716812160 },
+                  },
+                },
+              },
+            },
+          },
+          "404": {
+            description: "Stream not found.",
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/Error",
+                },
+              },
+            },
+          },
+          "500": {
+            description: "Failed to simulate claimable amount.",
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/Error",
+                },
+              },
+            },
+          },
+        },
+      },
+    },
     "/api/recipients/{accountId}/streams": {
       get: {
         summary: "Get recipient streams",
