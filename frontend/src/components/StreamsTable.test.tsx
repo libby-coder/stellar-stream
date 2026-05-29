@@ -133,9 +133,10 @@ describe('StreamsTable Component', () => {
   });
 
   it('renders a helpful message for empty streams array', () => {
-    render(<StreamsTable {...defaultProps} streams={[]} />);
+    render(<StreamsTable {...defaultProps} streams={[]} totalStreamCount={0} />);
     
-    expect(screen.getByText(/no streams match your filters/i)).toBeInTheDocument();
+    // When there are no streams at all, EmptyState should prompt creation.
+    expect(screen.getByText(/no streams yet/i)).toBeInTheDocument();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });
 });

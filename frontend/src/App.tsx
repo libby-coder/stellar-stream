@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type RefObject } from "react";
+import { useEffect, useMemo, useState, useCallback, type RefObject } from "react";
 import { CreateStreamForm } from "./components/CreateStreamForm";
 import { EditStartTimeModal } from "./components/EditStartTimeModal";
 import { IssueBacklog } from "./components/IssueBacklog";
@@ -41,6 +41,15 @@ function App() {
   } | null>(null);
   const [loadingDashboard, setLoadingDashboard] = useState(true);
   const [initialLoading, setInitialLoading] = useState(true);
+
+  // Unfiltered total count of streams (used to decide whether "Create Stream"
+  // should be shown when filters return zero results). This is intentionally
+  // separate from `streams.length` which reflects the current filtered list.
+  const [totalUnfilteredCount, setTotalUnfilteredCount] = useState<number>(0);
+  const CREATE_STREAM_SECTION_ID = "create-stream-section";
+  const scrollToCreateStream = useCallback(() => {
+    document.getElementById(CREATE_STREAM_SECTION_ID)?.scrollIntoView({ behavior: "smooth" });
+  }, []);
 
   const { filters, filteredStreams, setFilter } = useStreamFilter(streams);
   const wsUrl = import.meta.env.VITE_WS_URL ?? "";
@@ -133,6 +142,15 @@ function App() {
     setStreams(data);
   }
 
+  async function refreshUnfilteredCount(): Promise<void> {
+    try {
+      const all = await listStreams();
+      setTotalUnfilteredCount(all.length);
+    } catch {
+      // Ignore count errors; feature is best-effort.
+    }
+  }
+
   useEffect(() => {
     setLoadingDashboard(true);
     refreshStreams(apiFilters)
@@ -198,6 +216,8 @@ function App() {
     } catch (err) {
       if (err instanceof ApiError) {
         showToast(`Cancel failed (${err.statusCode}): ${err.message}`, "error");
+        // Update unfiltered count to reflect newly created stream.
+        await refreshUnfilteredCount();
         return;
       }
       showToast(
@@ -216,6 +236,9 @@ function App() {
       if (err instanceof ApiError) {
         showToast(`Update failed (${err.statusCode}): ${err.message}`, "error");
         return;
+        // Update unfiltered count in case a cancel removes the stream from
+        // the unfiltered listing in the backend semantics (best-effort).
+        void refreshUnfilteredCount();
       }
       showToast("Failed to update stream start time", "error");
     }
@@ -301,14 +324,18 @@ function App() {
           </section>
 
           <section className="layout-grid">
-            <CreateStreamForm
-              onCreate={handleCreate}
-              apiError={formError}
-              walletAddress={wallet.address}
-            />
+            <div id={CREATE_STREAM_SECTION_ID}>
+              <CreateStreamForm
+                onCreate={handleCreate}
+                apiError={formError}
+                walletAddress={wallet.address}
+              />
+            </div>
             <StreamsTable
               streams={filteredStreams}
               filters={tableFilters}
+              totalStreamCount={totalUnfilteredCount}
+              onCreateStream={scrollToCreateStream}
               onFiltersChange={(next) => {
                 setFilter("status", next.status ?? defaultStreamFilters.status);
                 setFilter("sender", next.sender ?? defaultStreamFilters.sender);
