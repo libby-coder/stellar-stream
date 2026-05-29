@@ -45,7 +45,7 @@ describe('Authentication Logic & Middleware', () => {
       expect(response.status).toBe(401);
       expect(response.body).toMatchObject({
         error: "Missing or invalid authorization header.",
-        code: "UNAUTHORIZED",
+        code: "unauthorized",
       });
     });
 
@@ -55,7 +55,7 @@ describe('Authentication Logic & Middleware', () => {
         .set('Authorization', 'Basic wrongformat');
       
       expect(response.status).toBe(401);
-      expect(response.body.code).toBe('UNAUTHORIZED');
+      expect(response.body.code).toBe('unauthorized');
     });
 
     it('should reject requests with an invalid token (401)', async () => {
@@ -65,15 +65,15 @@ describe('Authentication Logic & Middleware', () => {
       
       expect(response.status).toBe(401);
       expect(response.body).toMatchObject({
-        error: "Invalid or expired authorization token.",
-        code: "UNAUTHORIZED",
+        error: "Invalid authorization token.",
+        code: "invalid_token",
       });
     });
 
     it('should reject requests with an expired token (401)', async () => {
       const expiredToken = jwt.sign(
         { accountId: testAccountId }, 
-        TEST_SECRET, 
+        getJwtSecret(), 
         { expiresIn: '-1h' }
       );
 
@@ -83,8 +83,8 @@ describe('Authentication Logic & Middleware', () => {
       
       expect(response.status).toBe(401);
       expect(response.body).toMatchObject({
-        error: "Invalid or expired authorization token.",
-        code: "UNAUTHORIZED",
+        error: "Authorization token has expired.",
+        code: "token_expired",
       });
     });
 
@@ -164,5 +164,99 @@ describe('Authentication Logic & Middleware', () => {
       expect(response.status).toBe(401);
       expect(response.body.code).toBe('UNAUTHORIZED');
     });
+  });
+});
+
+describe('Stream Ownership Enforcement', () => {
+  const senderKeypair = Keypair.random();
+  const recipientKeypair = Keypair.random();
+  const thirdPartyKeypair = Keypair.random();
+
+  const senderToken = () =>
+    jwt.sign({ accountId: senderKeypair.publicKey() }, getJwtSecret(), { expiresIn: '1h' });
+  const recipientToken = () =>
+    jwt.sign({ accountId: recipientKeypair.publicKey() }, getJwtSecret(), { expiresIn: '1h' });
+  const thirdPartyToken = () =>
+    jwt.sign({ accountId: thirdPartyKeypair.publicKey() }, getJwtSecret(), { expiresIn: '1h' });
+
+  const STREAM_ID = '9001';
+
+  beforeAll(async () => {
+    const { initDb, getDb } = await import('./services/db');
+    initDb();
+    const db = getDb();
+
+    // Clean up any leftover state
+    db.exec("DELETE FROM stream_events WHERE stream_id = '" + STREAM_ID + "'");
+    db.exec("DELETE FROM streams WHERE id = '" + STREAM_ID + "'");
+
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(`
+      INSERT INTO streams (id, sender, recipient, asset_code, total_amount, duration_seconds, start_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      STREAM_ID,
+      senderKeypair.publicKey(),
+      recipientKeypair.publicKey(),
+      'USDC',
+      1000,
+      3600,
+      now - 60, // already started so vested > 0
+      now - 60,
+    );
+  });
+
+  it('sender cannot claim their own stream (403)', async () => {
+    const res = await request(mainApp)
+      .post(`/api/streams/${STREAM_ID}/claim`)
+      .set('Authorization', `Bearer ${senderToken()}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('FORBIDDEN');
+  });
+
+  it('recipient cannot cancel the stream (403)', async () => {
+    const res = await request(mainApp)
+      .post(`/api/streams/${STREAM_ID}/cancel`)
+      .set('Authorization', `Bearer ${recipientToken()}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('FORBIDDEN');
+  });
+
+  it('third party cannot claim the stream (403)', async () => {
+    const res = await request(mainApp)
+      .post(`/api/streams/${STREAM_ID}/claim`)
+      .set('Authorization', `Bearer ${thirdPartyToken()}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('FORBIDDEN');
+  });
+
+  it('third party cannot cancel the stream (403)', async () => {
+    const res = await request(mainApp)
+      .post(`/api/streams/${STREAM_ID}/cancel`)
+      .set('Authorization', `Bearer ${thirdPartyToken()}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('FORBIDDEN');
+  });
+
+  it('recipient can claim the stream (200)', async () => {
+    const res = await request(mainApp)
+      .post(`/api/streams/${STREAM_ID}/claim`)
+      .set('Authorization', `Bearer ${recipientToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.result.claimedAmount).toBeGreaterThan(0);
+  });
+
+  it('sender can cancel the stream (200)', async () => {
+    const res = await request(mainApp)
+      .post(`/api/streams/${STREAM_ID}/cancel`)
+      .set('Authorization', `Bearer ${senderToken()}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data.canceledAt).toBeDefined();
   });
 });

@@ -1,4 +1,5 @@
-import { useState, FormEvent } from "react";
+import { useState, useEffect, FormEvent } from "react";
+import { getConfig } from "../services/api";
 // Form Draft Autosave [Verified]: Survives refresh, clears on submit/discard, aligns with fields.
 import { useDraftAutosave } from "../hooks/useDraftAutosave";
 import { CreateStreamPayload } from "../types/stream";
@@ -105,7 +106,8 @@ const INITIAL_VALUES: FormValues = {
   startInMinutes: "0",
 };
 
-const allowedAssets = ["USDC", "XLM", "BTC"]; // example allowed assets
+// Initial fallback if fetch hasn't completed or failed
+const DEFAULT_ALLOWED_ASSETS = ["USDC", "XLM"];
 
 export function CreateStreamForm({
   onCreate,
@@ -114,8 +116,36 @@ export function CreateStreamForm({
 }: CreateStreamFormProps) {
   const [values, setValues, hasDraft, clearDraft] = useDraftAutosave<FormValues>(
     "stellar-stream:create-draft",
-    INITIAL_VALUES
+    INITIAL_VALUES,
+    2000 // Autosave every 2 seconds
   );
+  const [allowedAssets, setAllowedAssets] = useState<string[]>([]);
+  const [configFetchFailed, setConfigFetchFailed] = useState(false);
+
+  useEffect(() => {
+    async function fetchConfig() {
+      try {
+        const config = await getConfig();
+        setAllowedAssets(config.allowedAssets);
+        
+        // Handle defaulting logic
+        const currentAsset = values.assetCode;
+        const isCurrentValid = config.allowedAssets.includes(currentAsset);
+        
+        if (!isCurrentValid) {
+          if (config.allowedAssets.includes("USDC")) {
+            setValues(prev => ({ ...prev, assetCode: "USDC" }));
+          } else if (config.allowedAssets.length > 0) {
+            setValues(prev => ({ ...prev, assetCode: config.allowedAssets[0] }));
+          }
+        }
+      } catch (err) {
+        console.error("Failed to fetch config:", err);
+        setConfigFetchFailed(true);
+      }
+    }
+    fetchConfig();
+  }, []); // Only fetch once on mount
   const [touched, setTouched] = useState<
     Partial<Record<keyof FormValues, boolean>>
   >({});
@@ -168,8 +198,67 @@ export function CreateStreamForm({
 
   const parsedApiError = apiError ? humaniseApiError(apiError) : null;
 
+  const startInMinsNum = Number(values.startInMinutes);
+  const durationMinsNum = Number(values.durationMinutes);
+  const estimatedEndLabel: string | null = (() => {
+    if (
+      values.startInMinutes === "" ||
+      values.durationMinutes === "" ||
+      isNaN(startInMinsNum) ||
+      isNaN(durationMinsNum) ||
+      durationMinsNum < 1 ||
+      !Number.isInteger(durationMinsNum)
+    ) {
+      return null;
+    }
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const startAt =
+      startInMinsNum > 0 ? nowSeconds + Math.floor(startInMinsNum * 60) : nowSeconds;
+    const endAt = startAt + Math.floor(durationMinsNum * 60);
+    const endDate = new Date(endAt * 1000);
+    const datePart = new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      timeZone: "UTC",
+    }).format(endDate);
+    const timePart = new Intl.DateTimeFormat("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: "UTC",
+    }).format(endDate);
+    return `Ends: ${datePart} at ${timePart} UTC`;
+  })();
+
   return (
     <form onSubmit={handleSubmit} noValidate>
+      {hasDraft && (
+        <div
+          className="draft-recovery-banner"
+          role="status"
+          aria-live="polite"
+          aria-label="Draft recovered"
+        >
+          ✓ Your unsaved draft has been recovered. You can{" "}
+          <button
+            type="button"
+            className="draft-recovery-banner__discard-link"
+            onClick={() => {
+              if (window.confirm("Discard your unsaved stream draft?")) {
+                clearDraft();
+                setTouched({});
+                setSubmitAttempted(false);
+              }
+            }}
+            disabled={isSubmitting}
+          >
+            discard it
+          </button>{" "}
+          if you prefer to start over.
+        </div>
+      )}
+
       {parsedApiError && (
         <div className="api-error-box">
           <div className="api-error-box__title">{parsedApiError.title}</div>
@@ -250,21 +339,35 @@ export function CreateStreamForm({
               *
             </span>
           </label>
-          <select
-            id="stream-asset"
-            value={values.assetCode}
-            onChange={set("assetCode")}
-            onBlur={blur("assetCode")}
-            aria-describedby={errors.assetCode ? "asset-error" : "asset-hint"}
-            aria-invalid={!!errors.assetCode}
-            required
-          >
-            {allowedAssets.map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
-            ))}
-          </select>
+          {!configFetchFailed && allowedAssets.length > 0 ? (
+            <select
+              id="stream-asset"
+              value={values.assetCode}
+              onChange={set("assetCode")}
+              onBlur={blur("assetCode")}
+              aria-describedby={errors.assetCode ? "asset-error" : "asset-hint"}
+              aria-invalid={!!errors.assetCode}
+              required
+            >
+              {allowedAssets.map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              id="stream-asset"
+              type="text"
+              value={values.assetCode}
+              onChange={set("assetCode")}
+              onBlur={blur("assetCode")}
+              placeholder="e.g. USDC"
+              aria-describedby={errors.assetCode ? "asset-error" : "asset-hint"}
+              aria-invalid={!!errors.assetCode}
+              required
+            />
+          )}
           {errors.assetCode && (
             <span id="asset-error" className="field-error" role="alert">
               {errors.assetCode}
@@ -327,11 +430,16 @@ export function CreateStreamForm({
               if (["e", "E", "+", "-", "."].includes(e.key)) e.preventDefault();
             }}
             aria-describedby={
-              errors.durationMinutes ? "duration-error" : undefined
+              errors.durationMinutes ? "duration-error" : (estimatedEndLabel ? "duration-hint" : undefined)
             }
             aria-invalid={!!errors.durationMinutes}
             required
           />
+          {estimatedEndLabel && (
+            <span id="duration-hint" className="field-hint" aria-live="polite">
+              {estimatedEndLabel}
+            </span>
+          )}
           {errors.durationMinutes && (
             <span id="duration-error" className="field-error" role="alert">
               {errors.durationMinutes}
@@ -385,22 +493,6 @@ export function CreateStreamForm({
         >
           {isSubmitting ? "Creating…" : "Create Stream"}
         </button>
-        {hasDraft && (
-          <button
-            type="button"
-            className="btn-ghost"
-            onClick={() => {
-              if (window.confirm("Discard your unsaved stream draft?")) {
-                clearDraft();
-                setTouched({});
-                setSubmitAttempted(false);
-              }
-            }}
-            disabled={isSubmitting}
-          >
-            Discard Draft
-          </button>
-        )}
       </div>
     </form>
   );

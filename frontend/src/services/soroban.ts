@@ -1,6 +1,9 @@
 /**
  * Soroban / on-chain interactions for the StellarStream frontend.
  *
+ * For detailed TypeScript usage examples of the generated contract client,
+ * see: docs/CONTRACT_BINDINGS.md
+ *
  * `claimStream` calls the backend `/api/streams/:id/claim` endpoint which
  * builds, signs (fee-sponsored), and submits the Soroban `claim` transaction
  * on behalf of the recipient.  The backend returns the claimed amount and the
@@ -76,3 +79,4 @@ export async function claimOnChain(
 }
 
 export const claimStream = claimOnChain;
+

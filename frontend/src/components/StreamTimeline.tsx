@@ -13,8 +13,10 @@ export function computeFilteredEvents(
   events: StreamEvent[],
   activeFilters: Set<EventType>,
 ): StreamEvent[] {
-  if (activeFilters.size === 0) return events;
-  return events.filter((e) => activeFilters.has(e.eventType));
+  const filtered = activeFilters.size === 0
+    ? events
+    : events.filter((e) => activeFilters.has(e.eventType));
+  return [...filtered].sort((a, b) => a.timestamp - b.timestamp);
 }
 
 export function toggleFilter(prev: Set<EventType>, type: EventType): Set<EventType> {
@@ -42,6 +44,8 @@ export const FILTER_BUTTONS: Array<{ type: EventType; label: string }> = [
   { type: "claimed", label: "Claimed" },
   { type: "canceled", label: "Canceled" },
   { type: "start_time_updated", label: "Start Time Updated" },
+  { type: "paused", label: "Paused" },
+  { type: "resumed", label: "Resumed" },
 ];
 
 export function FilterBar({ activeFilters, onToggle, onClear }: FilterBarProps) {

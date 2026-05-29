@@ -1,4 +1,12 @@
+import { createHmac } from "crypto";
 import { getDb } from "./db";
+import { validateWebhookUrl } from "./webhookUrl";
+
+export { validateWebhookUrl } from "./webhookUrl";
+
+export function computeSignature(secret: string, body: string): string {
+  return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
+}
 
 const MAX_RETRIES = 5;
 const RETRY_DELAYS = [5, 15, 60, 300, 900]; // seconds: 5s, 15s, 60s, 300s, 900s
@@ -8,6 +16,12 @@ export const triggerWebhook = async (event: string, data: any): Promise<void> =>
 
   if (!url) {
     console.log(`[Webhook] Skipping ${event}: WEBHOOK_DESTINATION_URL not set.`);
+    return;
+  }
+
+  const urlValidation = validateWebhookUrl(url);
+  if (!urlValidation.valid) {
+    console.error(`[Webhook] Skipping ${event}: ${urlValidation.reason}.`);
     return;
   }
 
@@ -56,6 +70,33 @@ export function countDeadLetters(): number {
     .prepare(`SELECT COUNT(*) as count FROM webhook_dead_letters`)
     .get() as { count: number };
   return row.count;
+}
+
+export function requeueDeadLetter(id: number): boolean {
+  const db = getDb();
+  
+  return db.transaction(() => {
+    const deadLetter = db.prepare(`SELECT * FROM webhook_dead_letters WHERE id = ?`).get(id) as any;
+    if (!deadLetter) return false;
+
+    const now = Math.floor(Date.now() / 1000);
+    db.prepare(`
+      INSERT INTO webhook_deliveries (stream_id, event, payload, attempt, max_attempts, status, next_retry_at, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      deadLetter.stream_id,
+      deadLetter.event,
+      deadLetter.payload,
+      0, // reset attempt
+      5, // max_attempts
+      'pending',
+      now, // immediate retry
+      now
+    );
+
+    db.prepare(`DELETE FROM webhook_dead_letters WHERE id = ?`).run(id);
+    return true;
+  })();
 }
 
 export function getRetryDelaySeconds(attemptNumber: number): number {

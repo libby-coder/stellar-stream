@@ -22,6 +22,9 @@ import { RecipientDashboard } from "./RecipientDashboard";
 // Mock soroban service so tests don't hit the network
 // ---------------------------------------------------------------------------
 
+vi.mock("../services/soroban", () => ({
+  claimStream: vi.fn(),
+}));
 vi.mock("../services/soroban", () => {
   const mockFn = vi.fn();
   return {
@@ -38,7 +41,8 @@ vi.mock("../services/soroban", () => {
   };
 });
 
-import { claimOnChain } from "../services/soroban";
+import { claimStream, claimOnChain } from "../services/soroban";
+const mockClaimStream = claimStream as ReturnType<typeof vi.fn>;
 const mockClaimOnChain = claimOnChain as ReturnType<typeof vi.fn>;
 
 // ---------------------------------------------------------------------------
@@ -82,14 +86,16 @@ function setupRecipientHandler(streams: unknown[]) {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mockClaimOnChain.mockResolvedValue({
+  const mockResult = {
     result: {
       claimedAmount: 500,
       assetCode: "USDC",
       txHash: "txhash123",
     },
-    history: []
-  });
+    history: [],
+  };
+  mockClaimStream.mockResolvedValue(mockResult);
+  mockClaimOnChain.mockResolvedValue(mockResult);
 });
 
 // ---------------------------------------------------------------------------
@@ -116,6 +122,9 @@ describe("RecipientDashboard", () => {
     setupRecipientHandler([activeStream]);
     render(<RecipientDashboard recipientAddress={RECIPIENT} />);
 
+    await waitFor(() =>
+      expect(screen.getByLabelText(/claim.*from stream 1/i)).toBeInTheDocument(),
+    );
     await waitFor(() => {
       const claimButton = screen.getByLabelText(/claim 500 USDC from stream 1/i);
       expect(claimButton).toBeInTheDocument();
@@ -152,7 +161,7 @@ describe("RecipientDashboard", () => {
 
   it("claim button is disabled while a claim is pending", async () => {
     // Never resolves — simulates in-flight transaction
-    mockClaimOnChain.mockReturnValue(new Promise(() => {}));
+    mockClaimStream.mockReturnValue(new Promise(() => {}));
     setupRecipientHandler([activeStream]);
     render(<RecipientDashboard recipientAddress={RECIPIENT} />);
 
@@ -203,10 +212,7 @@ describe("RecipientDashboard", () => {
   });
 
   it("shows error toast when claim fails", async () => {
-    const { SorobanClaimError } = await import("../services/soroban");
-    mockClaimOnChain.mockRejectedValue(
-      new SorobanClaimError("amount exceeds claimable", "INSUFFICIENT_VESTED"),
-    );
+    mockClaimStream.mockRejectedValue(new Error("amount exceeds claimable"));
     setupRecipientHandler([activeStream]);
     render(<RecipientDashboard recipientAddress={RECIPIENT} />);
 
@@ -224,7 +230,7 @@ describe("RecipientDashboard", () => {
   });
 
   it("does not update local state on failed claim", async () => {
-    mockClaimOnChain.mockRejectedValue(new Error("network error"));
+    mockClaimStream.mockRejectedValue(new Error("network error"));
     setupRecipientHandler([activeStream]);
     render(<RecipientDashboard recipientAddress={RECIPIENT} />);
 
@@ -236,16 +242,30 @@ describe("RecipientDashboard", () => {
       fireEvent.click(screen.getByLabelText(/claim 500 USDC from stream 1/i));
     });
 
-    // Stream should still show original vested amount in the table cell (not optimistically updated)
     await waitFor(() => {
       const vestedCells = screen.getAllByText(/500.*USDC/);
-      // At least one cell (the <strong> in the table) should still show 500
       expect(vestedCells.length).toBeGreaterThan(0);
     });
-    // Claim button should still show the original amount (not 0)
     expect(screen.getByLabelText(/claim 500 USDC from stream 1/i)).toBeInTheDocument();
   });
 
+  it("shows pending banner while claim is in-flight", async () => {
+    mockClaimStream.mockReturnValue(new Promise(() => {}));
+    setupRecipientHandler([activeStream]);
+    render(<RecipientDashboard recipientAddress={RECIPIENT} />);
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/claim.*from stream 1/i)).toBeInTheDocument(),
+    );
+
+    act(() => {
+      fireEvent.click(screen.getByLabelText(/claim.*from stream 1/i));
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText(/waiting for on-chain confirmation/i)).toBeInTheDocument(),
+    );
+  });
 
   it("toast can be dismissed", async () => {
     setupRecipientHandler([activeStream]);

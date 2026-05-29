@@ -1,7 +1,8 @@
 import axios from "axios";
 import { getDb } from "./db";
 import { getRetryDelaySeconds } from "./webhook";
-import { getWebhookHeaders } from "./webhookSignature";
+
+
 
 let isProcessing = false;
 let pollingInterval: NodeJS.Timeout | null = null;
@@ -13,6 +14,13 @@ export const processWebhookQueue = async () => {
   try {
     const url = process.env.WEBHOOK_DESTINATION_URL;
     if (!url) {
+      isProcessing = false;
+      return;
+    }
+
+    const urlValidation = validateWebhookUrl(url);
+    if (!urlValidation.valid) {
+      console.error(`[WebhookWorker] Skipping delivery: ${urlValidation.reason}.`);
       isProcessing = false;
       return;
     }
@@ -44,7 +52,10 @@ export const processWebhookQueue = async () => {
           timestamp,
         };
         const bodyString = JSON.stringify(body);
-        const headers = getWebhookHeaders(bodyString, process.env.WEBHOOK_SIGNING_SECRET);
+        const headers = getWebhookHeaders(
+          bodyString,
+          process.env.WEBHOOK_SIGNING_SECRET,
+        );
 
         await axios.post(url, bodyString, { headers });
         success = true;
@@ -67,9 +78,9 @@ export const processWebhookQueue = async () => {
         if (newAttempt >= max_attempts) {
           // Move to dead-letter storage
           db.prepare(
-            `INSERT INTO webhook_dead_letters (url, payload, last_error, failed_at)
-             VALUES (?, ?, ?, ?)`
-          ).run(url, payload, errorMsg, updateNow);
+            `INSERT INTO webhook_dead_letters (stream_id, event, url, payload, last_error, failed_at)
+             VALUES (?, ?, ?, ?, ?, ?)`
+          ).run(delivery.stream_id, event, url, payload, errorMsg, updateNow);
 
           db.prepare(
             `DELETE FROM webhook_deliveries WHERE id = ?`

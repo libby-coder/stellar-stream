@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import { claimStream, ClaimResult } from "../services/soroban";
 import type { StreamEvent } from "../services/api";
 
@@ -55,6 +55,9 @@ export function useClaimStream(
     async ({ streamId, recipientAddress, amount }: ClaimInput) => {
       // Block concurrent claims
       if (claimState.status === "pending") return;
+
+      // Early return for zero amount to prevent unnecessary API calls
+      if (amount === 0) return;
 
       const claimId = ++claimIdRef.current;
 

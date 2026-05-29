@@ -157,7 +157,7 @@ export const swaggerDocument = {
           },
           eventType: {
             type: "string",
-            enum: ["created", "claimed", "canceled", "start_time_updated"],
+            enum: ["created", "claimed", "canceled", "start_time_updated", "paused", "resumed", "completed"],
             example: "created",
           },
           timestamp: {
@@ -391,6 +391,81 @@ export const swaggerDocument = {
         },
       },
     },
+    "/api/stats": {
+      get: {
+        summary: "Get aggregate stream statistics",
+        description:
+          "Returns aggregate statistics across all streams. " +
+          "Result is cached for 30 seconds. Useful for admin dashboards and monitoring.",
+        responses: {
+          "200": {
+            description: "Aggregate stream statistics.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    data: {
+                      type: "object",
+                      properties: {
+                        total_streams: {
+                          type: "integer",
+                          description: "Total number of streams.",
+                          example: 42,
+                        },
+                        active_streams: {
+                          type: "integer",
+                          description: "Streams currently streaming (started, not yet ended or canceled).",
+                          example: 10,
+                        },
+                        completed_streams: {
+                          type: "integer",
+                          description: "Streams that have fully completed.",
+                          example: 25,
+                        },
+                        canceled_streams: {
+                          type: "integer",
+                          description: "Streams that were canceled.",
+                          example: 7,
+                        },
+                        total_vested: {
+                          type: "number",
+                          description: "Total tokens vested across all active and completed streams.",
+                          example: 98432.5,
+                        },
+                        avg_duration_seconds: {
+                          type: "integer",
+                          description: "Average stream duration in seconds.",
+                          example: 3600,
+                        },
+                        unique_senders: {
+                          type: "integer",
+                          description: "Number of distinct sender accounts.",
+                          example: 18,
+                        },
+                        unique_recipients: {
+                          type: "integer",
+                          description: "Number of distinct recipient accounts.",
+                          example: 31,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          "500": {
+            description: "Failed to compute stats.",
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/Error" },
+              },
+            },
+          },
+        },
+      },
+    },
     "/api/streams": {
       get: {
         summary: "List all streams",
@@ -430,6 +505,15 @@ export const swaggerDocument = {
             in: "query",
             required: false,
             description: "Exact asset code match.",
+            schema: {
+              type: "string",
+            },
+          },
+          {
+            name: "assetCode",
+            in: "query",
+            required: false,
+            description: "Filter by one or more asset codes (comma-separated). Case-insensitive. Example: ?assetCode=USDC,XLM",
             schema: {
               type: "string",
             },
@@ -599,6 +683,61 @@ export const swaggerDocument = {
           },
           "404": {
             description: "Stream not found.",
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/Error",
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+    "/api/streams/{id}/claimable": {
+      get: {
+        summary: "Get real-time claimable amount",
+        description: "Retrieves the current real-time claimable amount for a stream using Soroban contract simulation. Returns 0 if paused, canceled, or before the cliff.",
+        parameters: [
+          {
+            name: "id",
+            in: "path",
+            required: true,
+            description: "The unique ID of the stream.",
+            schema: {
+              type: "string",
+            },
+          },
+        ],
+        responses: {
+          "200": {
+            description: "Real-time claimable amount and query context.",
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  properties: {
+                    streamId: { type: "string", example: "1" },
+                    claimableAmount: { type: "number", example: 450.123456 },
+                    assetCode: { type: "string", example: "USDC" },
+                    at: { type: "integer", description: "Ledger timestamp at which query was simulated", example: 1716812160 },
+                  },
+                },
+              },
+            },
+          },
+          "404": {
+            description: "Stream not found.",
+            content: {
+              "application/json": {
+                schema: {
+                  $ref: "#/components/schemas/Error",
+                },
+              },
+            },
+          },
+          "500": {
+            description: "Failed to simulate claimable amount.",
             content: {
               "application/json": {
                 schema: {
@@ -941,12 +1080,15 @@ export const swaggerDocument = {
                   properties: {
                     data: {
                       type: "object",
-                      required: ["created", "claimed", "canceled", "start_time_updated"],
+                      required: ["created", "claimed", "canceled", "start_time_updated", "paused", "resumed", "completed"],
                       properties: {
                         created: { type: "integer", example: 1 },
                         claimed: { type: "integer", example: 3 },
                         canceled: { type: "integer", example: 0 },
                         start_time_updated: { type: "integer", example: 1 },
+                        paused: { type: "integer", example: 0 },
+                        resumed: { type: "integer", example: 0 },
+                        completed: { type: "integer", example: 1 },
                       },
                     },
                   },
