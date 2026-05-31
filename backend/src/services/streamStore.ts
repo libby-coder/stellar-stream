@@ -9,6 +9,7 @@ import {
   TransactionBuilder,
   Networks,
   Account,
+  xdr,
 } from "@stellar/stellar-sdk";
 import pLimit from "p-limit";
 import { initDb, getDb } from "./db";
@@ -426,6 +427,66 @@ export async function getOnChainClaimableAmount(
 
   const claimableAmount = Number(scValToNative(simRes.result.retval));
   return { claimableAmount, at };
+}
+
+const MAX_CLAIMABLE_BATCH_SIZE = 20;
+
+function parseClaimableBatchMap(native: unknown): Record<string, number> {
+  const result: Record<string, number> = {};
+  if (native instanceof Map) {
+    for (const [key, value] of native.entries()) {
+      result[String(key)] = Number(value);
+    }
+    return result;
+  }
+  if (native && typeof native === "object") {
+    for (const [key, value] of Object.entries(native as Record<string, unknown>)) {
+      result[String(key)] = Number(value);
+    }
+  }
+  return result;
+}
+
+export async function getOnChainClaimableBatch(
+  ids: string[],
+): Promise<{ amounts: Record<string, number>; at: number }> {
+  if (ids.length === 0) {
+    const at = await getLatestLedgerTime();
+    return { amounts: {}, at };
+  }
+  if (ids.length > MAX_CLAIMABLE_BATCH_SIZE) {
+    throw new Error(`Too many stream IDs (max ${MAX_CLAIMABLE_BATCH_SIZE})`);
+  }
+
+  const sorobanContext = getSorobanContext();
+  if (!sorobanContext || !rpcServer) {
+    throw new Error("Soroban RPC server is not initialized.");
+  }
+
+  const sourceAccount = await sorobanContext.sourceAccountPromise;
+  const latestLedger = await rpcServer.getLatestLedger();
+  const at = latestLedger.closeTime
+    ? parseInt(latestLedger.closeTime, 10)
+    : Math.floor(Date.now() / 1000);
+
+  const streamIdVec = xdr.ScVal.scvVec(
+    ids.map((id) => nativeToScVal(parseInt(id, 10), { type: "u64" })),
+  );
+
+  const simRes = await simulateContractCall(
+    sorobanContext.contract,
+    sourceAccount,
+    "get_claimable_batch",
+    streamIdVec,
+    nativeToScVal(at, { type: "u64" }),
+  );
+
+  if (!rpc.Api.isSimulationSuccess(simRes) || !simRes.result) {
+    throw new Error("Simulation failed: " + JSON.stringify(simRes));
+  }
+
+  const amounts = parseClaimableBatchMap(scValToNative(simRes.result.retval));
+  return { amounts, at };
 }
 
 export async function getLatestLedgerTime(): Promise<number> {

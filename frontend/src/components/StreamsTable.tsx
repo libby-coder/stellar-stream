@@ -1,10 +1,24 @@
-
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { Stream } from "../types/stream";
 import { getExportCsvUrl, ListStreamsFilters, cancelStream } from "../services/api";
 import { CopyableAddress } from "./CopyableAddress";
 import { StreamTimeline } from "./StreamTimeline";
 import { getHealthBadges } from "../utils/streamHealthBadges";
 import { FilterBar } from "./FilterBar";
+import {
+  OPTIONAL_COLUMN_LABELS,
+  OPTIONAL_STREAM_COLUMNS,
+  useStreamTableColumns,
+  type OptionalStreamColumn,
+} from "../hooks/useStreamTableColumns";
 
 interface StreamsTableProps {
   streams: Stream[];
@@ -15,39 +29,37 @@ interface StreamsTableProps {
   onPause: (streamId: string) => Promise<void>;
   onResume: (streamId: string) => Promise<void>;
   onOpenStream?: (streamId: string) => void;
-  /**
-   * Called when the user clicks "Edit" for a scheduled stream.
-   * Receives the stream AND the button ref so the modal can return focus.
-   */
   onEditStartTime: (stream: Stream, triggerRef: RefObject<HTMLButtonElement | null>) => void;
-  onRefresh?: () => void;
 }
-
-// ── Skeleton rows (#397) ──────────────────────────────────────────────────
 
 const SKELETON_ROW_COUNT = 6;
 
-function SkeletonRow() {
+function SkeletonRow({ colCount }: { colCount: number }) {
   return (
     <tr aria-hidden="true">
-      <td><div className="skeleton" style={{ width: "80px", height: "16px" }} /></td>
-      <td><div className="skeleton" style={{ width: "120px", height: "32px" }} /></td>
-      <td><div className="skeleton" style={{ width: "90px", height: "16px" }} /></td>
-      <td><div className="skeleton" style={{ width: "100%", height: "20px" }} /></td>
-      <td><div className="skeleton" style={{ width: "70px", height: "20px" }} /></td>
-      <td><div className="skeleton" style={{ width: "80px", height: "28px" }} /></td>
+      {Array.from({ length: colCount }, (_, i) => (
+        <td key={i}>
+          <div className="skeleton" style={{ width: "80px", height: "16px" }} />
+        </td>
+      ))}
     </tr>
   );
 }
 
 function statusClass(status: Stream["progress"]["status"]): string {
   switch (status) {
-    case "active":    return "badge badge-active";
-    case "scheduled": return "badge badge-scheduled";
-    case "completed": return "badge badge-completed";
-    case "canceled":  return "badge badge-canceled";
-    case "paused":    return "badge badge-paused";
-    default:          return "badge";
+    case "active":
+      return "badge badge-active";
+    case "scheduled":
+      return "badge badge-scheduled";
+    case "completed":
+      return "badge badge-completed";
+    case "canceled":
+      return "badge badge-canceled";
+    case "paused":
+      return "badge badge-paused";
+    default:
+      return "badge";
   }
 }
 
@@ -55,120 +67,77 @@ function formatTimestamp(unixSeconds: number): string {
   return new Date(unixSeconds * 1000).toLocaleString();
 }
 
-type SortColumn = "status" | "amount" | "vested" | "startDate" | null;
-type SortDirection = "asc" | "desc" | null;
+function formatDuration(seconds: number): string {
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
+  if (seconds < 86400) return `${(seconds / 3600).toFixed(1)}h`;
+  return `${(seconds / 86400).toFixed(1)}d`;
+}
 
 export function StreamsTable({
   streams,
+  loading = false,
   filters,
   onFiltersChange,
   onCancel,
   onPause,
   onResume,
-  onOpenStream,
   onEditStartTime,
-  onRefresh,
+  onOpenStream,
 }: StreamsTableProps) {
-  const [expandedStreamId, setExpandedStreamId] = useState<string | null>(null);
-  const [sortColumn, setSortColumn] = useState<SortColumn>(null);
-  const [sortDirection, setSortDirection] = useState<SortDirection>(null);
+  const { visibility, toggleColumn, isVisible } = useStreamTableColumns();
+  const [columnsOpen, setColumnsOpen] = useState(false);
+  const columnsRef = useRef<HTMLDivElement>(null);
+
   const [selectedStreamIds, setSelectedStreamIds] = useState<Set<string>>(new Set());
-  const [isBulkCanceling, setIsBulkCanceling] = useState<boolean>(false);
-  const [bulkCancelProgress, setBulkCancelProgress] = useState<{ current: number; total: number }>({
-    current: 0,
-    total: 0,
-  });
+  const [expandedStreamId, setExpandedStreamId] = useState<string | null>(null);
+  const [isBulkCanceling, setIsBulkCanceling] = useState(false);
+  const [bulkCancelProgress, setBulkCancelProgress] = useState({ current: 0, total: 0 });
 
-  const exportUrl = useMemo(() => getExportCsvUrl(filters as Record<string, string>), [filters]);
+  const exportUrl = useMemo(() => getExportCsvUrl(filters), [filters]);
 
-  const toggleTimeline = (streamId: string) => {
-    setExpandedStreamId((prev) => (prev === streamId ? null : streamId));
-  };
+  const sortedStreams = useMemo(
+    () => [...streams].sort((a, b) => a.id.localeCompare(b.id)),
+    [streams],
+  );
 
+  const visibleOptionalColumns = useMemo(
+    () => OPTIONAL_STREAM_COLUMNS.filter((col) => isVisible(col)),
+    [isVisible, visibility],
+  );
 
-  // Sort streams based on current sort state
-  const sortedStreams = useMemo(() => {
-    if (!sortColumn || !sortDirection) {
-      return streams;
-    }
+  const colCount = 7 + visibleOptionalColumns.length;
 
-    const sorted = [...streams];
+  const isStreamSelectable = useCallback((stream: Stream): boolean => {
+    return (
+      stream.progress.status === "active" || stream.progress.status === "scheduled"
+    );
+  }, []);
 
-    sorted.sort((a, b) => {
-      let valueA: number | string | Date;
-      let valueB: number | string | Date;
+  const selectableStreams = useMemo(
+    () => streams.filter(isStreamSelectable),
+    [streams, isStreamSelectable],
+  );
+  const selectableIds = useMemo(
+    () => new Set(selectableStreams.map((s) => s.id)),
+    [selectableStreams],
+  );
 
-      switch (sortColumn) {
-        case "status": {
-          const statusOrder: Record<string, number> = {
-            active: 0,
-            scheduled: 1,
-            completed: 2,
-            canceled: 3,
-            paused: 4,
-          };
-          valueA = statusOrder[a.progress.status] ?? 999;
-          valueB = statusOrder[b.progress.status] ?? 999;
-          break;
-        }
-        case "amount": {
-          valueA = a.totalAmount;
-          valueB = b.totalAmount;
-          break;
-        }
-        case "vested": {
-          valueA = a.progress.vestedAmount;
-          valueB = b.progress.vestedAmount;
-          break;
-        }
-        case "startDate": {
-          valueA = a.startAt;
-          valueB = b.startAt;
-          break;
-        }
-        default:
-          return 0;
-      }
+  const allSelectableSelected = useMemo(
+    () =>
+      selectableStreams.length > 0 &&
+      selectableStreams.every((stream) => selectedStreamIds.has(stream.id)),
+    [selectableStreams, selectedStreamIds],
+  );
 
-      if (valueA < valueB) {
-        return sortDirection === "asc" ? -1 : 1;
-      }
-      if (valueA > valueB) {
-        return sortDirection === "asc" ? 1 : -1;
-      }
-      return 0;
-    });
-
-    return sorted;
-  }, [streams, sortColumn, sortDirection]);
-
-  // Helper: determine if a stream is eligible for selection (active or scheduled)
-
-
-  // Get all selectable streams on current page
-  const selectableStreams = useMemo(() => streams.filter(isStreamSelectable), [streams, isStreamSelectable]);
-  const selectableIds = useMemo(() => new Set(selectableStreams.map((s) => s.id)), [selectableStreams]);
-
-  // Determine if all selectable streams are selected
-  const allSelectableSelected = useMemo(() =>
-    selectableStreams.length > 0 &&
-    selectableStreams.every((stream) => selectedStreamIds.has(stream.id)),
-  [selectableStreams, selectedStreamIds]);
-
-  // Handle individual checkbox toggle
   const handleCheckboxToggle = useCallback((streamId: string) => {
     setSelectedStreamIds((prev) => {
       const next = new Set(prev);
-      if (next.has(streamId)) {
-        next.delete(streamId);
-      } else {
-        next.add(streamId);
-      }
+      if (next.has(streamId)) next.delete(streamId);
+      else next.add(streamId);
       return next;
     });
   }, []);
 
-  // Handle "Select All" toggle
   const handleSelectAllToggle = useCallback(() => {
     if (allSelectableSelected) {
       setSelectedStreamIds((prev) => {
@@ -189,7 +158,6 @@ export function StreamsTable({
     setExpandedStreamId((prev) => (prev === id ? null : id));
   }, []);
 
-  // Sequential bulk cancellation
   const handleBulkCancel = useCallback(async () => {
     const idsToCancel = Array.from(selectedStreamIds);
     if (idsToCancel.length === 0) return;
@@ -197,28 +165,20 @@ export function StreamsTable({
     setIsBulkCanceling(true);
     setBulkCancelProgress({ current: 0, total: idsToCancel.length });
 
-    let successCount = 0;
-    let failureCount = 0;
-
     for (let i = 0; i < idsToCancel.length; i++) {
-      const streamId = idsToCancel[i];
       setBulkCancelProgress({ current: i + 1, total: idsToCancel.length });
       try {
-        await cancelStream(streamId);
-        successCount++;
+        await cancelStream(idsToCancel[i]);
       } catch (error) {
-        console.error(`Failed to cancel stream ${streamId}:`, error);
-        failureCount++;
+        console.error(`Failed to cancel stream ${idsToCancel[i]}:`, error);
       }
     }
 
     setSelectedStreamIds(new Set());
     setIsBulkCanceling(false);
     setBulkCancelProgress({ current: 0, total: 0 });
-    console.log(`Bulk cancellation complete: ${successCount} succeeded, ${failureCount} failed`);
   }, [selectedStreamIds]);
 
-  // Clear selections when streams change (e.g., after filter change)
   useEffect(() => {
     setSelectedStreamIds((prev) => {
       const validIds = new Set(streams.map((s) => s.id));
@@ -230,13 +190,114 @@ export function StreamsTable({
     });
   }, [streams]);
 
-  return (
+  useEffect(() => {
+    if (!columnsOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (columnsRef.current && !columnsRef.current.contains(e.target as Node)) {
+        setColumnsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [columnsOpen]);
 
+  return (
+    <>
+      <div className="card">
+        <FilterBar filters={filters} onChange={onFiltersChange} />
+        <div
+          className="streams-table-toolbar"
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: "1rem",
+            gap: "0.75rem",
+          }}
+        >
+          <h2 style={{ margin: 0 }}>Live Streams</h2>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+            <div className="column-toggle" ref={columnsRef} style={{ position: "relative" }}>
+              <button
+                type="button"
+                className="btn-ghost"
+                aria-expanded={columnsOpen}
+                aria-haspopup="true"
+                aria-label="Toggle table columns"
+                onClick={() => setColumnsOpen((o) => !o)}
+              >
+                ⊞ Columns
+              </button>
+              {columnsOpen && (
+                <div
+                  className="column-toggle-popover"
+                  role="dialog"
+                  aria-label="Column visibility"
+                  style={{
+                    position: "absolute",
+                    right: 0,
+                    top: "100%",
+                    marginTop: "0.25rem",
+                    zIndex: 20,
+                    background: "var(--color-background)",
+                    border: "1px solid var(--color-border)",
+                    borderRadius: "8px",
+                    padding: "0.75rem",
+                    minWidth: "200px",
+                    boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                  }}
+                >
+                  <p className="muted" style={{ margin: "0 0 0.5rem", fontSize: "0.85rem" }}>
+                    Optional columns
+                  </p>
+                  {OPTIONAL_STREAM_COLUMNS.map((col) => (
+                    <label
+                      key={col}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "0.5rem",
+                        marginBottom: "0.35rem",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isVisible(col)}
+                        onChange={() => toggleColumn(col)}
+                      />
+                      {OPTIONAL_COLUMN_LABELS[col]}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+            <a href={exportUrl} className="btn-ghost" download>
+              Export CSV
+            </a>
+          </div>
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <table aria-busy={loading} aria-label="Streams">
+            <thead>
+              <tr>
+                <th>
+                  <input
+                    type="checkbox"
+                    aria-label="Select all streams"
+                    checked={allSelectableSelected}
+                    onChange={handleSelectAllToggle}
+                    disabled={loading}
                   />
                 </th>
                 <th>ID</th>
-                <th>Addresses</th>
-                <th>Amount</th>
+                <th>Sender</th>
+                <th>Recipient</th>
+                {isVisible("assetCode") && <th>Asset</th>}
+                {isVisible("duration") && <th>Duration</th>}
+                {isVisible("ratePerSecond") && <th>Rate / sec</th>}
+                {isVisible("pausedDuration") && <th>Paused</th>}
                 <th>Progress</th>
                 <th>Status</th>
                 <th>Actions</th>
@@ -245,38 +306,35 @@ export function StreamsTable({
             <tbody>
               {loading
                 ? Array.from({ length: SKELETON_ROW_COUNT }, (_, i) => (
-                    <SkeletonRow key={i} />
+                    <SkeletonRow key={i} colCount={colCount} />
                   ))
-                : sortedStreams.map((stream) => {
-                    const isScheduled = stream.progress.status === "scheduled";
-                    const isFinalised =
-                      stream.progress.status === "completed" ||
-                      stream.progress.status === "canceled";
-                    const isExpanded = expandedStreamId === stream.id;
-                    const healthBadges = getHealthBadges(stream);
-                    return (
-                      <StreamRow
-                        key={stream.id}
-                        stream={stream}
-                        isScheduled={isScheduled}
-                        isFinalised={isFinalised}
-                        isExpanded={isExpanded}
-                        healthBadges={healthBadges}
-                        isSelected={selectedStreamIds.has(stream.id)}
-                        onToggleTimeline={toggleTimeline}
-                        onCheckboxToggle={handleCheckboxToggle}
-                        onCancel={onCancel}
-                        onPause={onPause}
-                        onResume={onResume}
-                        onEditStartTime={onEditStartTime}
-                        onOpenStream={onOpenStream}
-                      />
-                    );
-                  })}
+                : sortedStreams.map((stream) => (
+                    <StreamRow
+                      key={stream.id}
+                      stream={stream}
+                      isScheduled={stream.progress.status === "scheduled"}
+                      isFinalised={
+                        stream.progress.status === "completed" ||
+                        stream.progress.status === "canceled"
+                      }
+                      isExpanded={expandedStreamId === stream.id}
+                      healthBadges={getHealthBadges(stream)}
+                      isSelected={selectedStreamIds.has(stream.id)}
+                      visibleOptionalColumns={visibleOptionalColumns}
+                      colSpan={colCount}
+                      onToggleTimeline={toggleTimeline}
+                      onCheckboxToggle={handleCheckboxToggle}
+                      onCancel={onCancel}
+                      onPause={onPause}
+                      onResume={onResume}
+                      onEditStartTime={onEditStartTime}
+                      onOpenStream={onOpenStream}
+                    />
+                  ))}
             </tbody>
           </table>
         </div>
-
+      </div>
 
       {selectedStreamIds.size > 0 && (
         <BulkActionBar
@@ -286,7 +344,7 @@ export function StreamsTable({
           progress={bulkCancelProgress}
         />
       )}
-    </div>
+    </>
   );
 }
 
@@ -330,9 +388,8 @@ interface StreamRowProps {
   isExpanded: boolean;
   isSelected: boolean;
   healthBadges: ReturnType<typeof getHealthBadges>;
-  isSelected: boolean;
-  isSelectable: boolean;
-  onToggleSelect: () => void;
+  visibleOptionalColumns: OptionalStreamColumn[];
+  colSpan: number;
   onToggleTimeline: (id: string) => void;
   onCheckboxToggle: (id: string) => void;
   onCancel: (id: string) => Promise<void>;
@@ -349,9 +406,8 @@ const StreamRow = memo(function StreamRow({
   isExpanded,
   isSelected,
   healthBadges,
-  isSelected,
-  isSelectable,
-  onToggleSelect,
+  visibleOptionalColumns,
+  colSpan,
   onToggleTimeline,
   onCheckboxToggle,
   onCancel,
@@ -363,55 +419,11 @@ const StreamRow = memo(function StreamRow({
   const editBtnRef = useRef<HTMLButtonElement>(null);
   const isPaused = stream.progress.status === "paused";
   const isActive = stream.progress.status === "active";
+  const show = (col: OptionalStreamColumn) => visibleOptionalColumns.includes(col);
 
   return (
     <>
-      <tr
-        tabIndex={0}
-        className="stream-table-row-focusable"
-        onKeyDown={(e) => {
-          if (e.key === "Enter") {
-            const target = e.target as HTMLElement;
-            if (
-              target.tagName === "BUTTON" ||
-              target.closest("button") ||
-              target.tagName === "A" ||
-              target.closest("a") ||
-              target.tagName === "INPUT" ||
-              target.closest("input")
-            ) {
-              return;
-            }
-            e.preventDefault();
-            onOpenStream?.(stream.id);
-          }
-        }}
-        onClick={(e) => {
-          const target = e.target as HTMLElement;
-          if (
-            target.tagName === "BUTTON" ||
-            target.closest("button") ||
-            target.tagName === "A" ||
-            target.closest("a") ||
-            target.tagName === "INPUT" ||
-            target.closest("input")
-          ) {
-            return;
-          }
-          onOpenStream?.(stream.id);
-        }}
-      >
-        <td style={{ width: "40px", textAlign: "center" }}>
-          {isSelectable && (
-            <input
-              type="checkbox"
-              checked={isSelected}
-              onChange={onToggleSelect}
-              aria-label={`Select stream ${stream.id}`}
-              style={{ cursor: "pointer" }}
-            />
-          )}
-        </td>
+      <tr>
         <td>
           <input
             type="checkbox"
@@ -437,15 +449,19 @@ const StreamRow = memo(function StreamRow({
           </button>
         </td>
         <td>
-          <div className="stacked">
-            <CopyableAddress address={stream.sender} truncationMode="end" />
-            <CopyableAddress address={stream.recipient} truncationMode="end" />
-          </div>
+          <CopyableAddress address={stream.sender} truncationMode="end" />
         </td>
         <td>
-          {stream.totalAmount} {stream.assetCode}
-          <div className="muted">Start: {formatTimestamp(stream.startAt)}</div>
+          <CopyableAddress address={stream.recipient} truncationMode="end" />
         </td>
+        {show("assetCode") && <td>{stream.assetCode}</td>}
+        {show("duration") && <td>{formatDuration(stream.durationSeconds)}</td>}
+        {show("ratePerSecond") && (
+          <td>{stream.progress.ratePerSecond.toFixed(6)}</td>
+        )}
+        {show("pausedDuration") && (
+          <td>{stream.pausedDuration ?? 0}s</td>
+        )}
         <td>
           <div className="progress-copy">
             <strong>{stream.progress.percentComplete}%</strong>
@@ -531,7 +547,7 @@ const StreamRow = memo(function StreamRow({
       {isExpanded && (
         <tr id={`timeline-${stream.id}`}>
           <td
-            colSpan={7}
+            colSpan={colSpan}
             style={{
               padding: "1rem 1.5rem",
               background: "var(--color-background-secondary)",
@@ -548,5 +564,6 @@ const StreamRow = memo(function StreamRow({
   prev.isExpanded === next.isExpanded &&
   prev.isSelected === next.isSelected &&
   prev.isScheduled === next.isScheduled &&
-  prev.isFinalised === next.isFinalised
+  prev.isFinalised === next.isFinalised &&
+  prev.visibleOptionalColumns.join() === next.visibleOptionalColumns.join()
 );
