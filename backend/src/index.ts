@@ -43,6 +43,7 @@ import {
   createStream,
   getStream,
   getOnChainClaimableAmount,
+  getOnChainClaimableBatch,
   getLatestLedgerTime,
   initSoroban,
   listStreams,
@@ -501,6 +502,58 @@ app.get(
   },
 );
 
+const claimableBatchBodySchema = z.object({
+  streamIds: z
+    .array(z.string().regex(/^\d+$/, "Stream ID must be numeric"))
+    .min(1, "At least one stream ID is required")
+    .max(20, "Maximum 20 stream IDs per batch"),
+});
+
+app.post(
+  "/api/streams/claimable/batch",
+  claimableLimiter,
+  async (req: Request, res: Response) => {
+    const parsed = claimableBatchBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      sendValidationError(req, res, parsed.error.issues);
+      return;
+    }
+
+    for (const streamId of parsed.data.streamIds) {
+      const parsedId = parseStreamId(streamId);
+      if (!parsedId.ok) {
+        sendValidationError(req, res, parsedId.issues);
+        return;
+      }
+      const stream = getStream(parsedId.value);
+      if (!stream) {
+        sendApiError(req, res, 404, `Stream ${streamId} not found.`, {
+          code: "NOT_FOUND",
+        });
+        return;
+      }
+    }
+
+    try {
+      const { amounts, at } = await getOnChainClaimableBatch(parsed.data.streamIds);
+      res.json({ amounts, at });
+    } catch (error: unknown) {
+      console.error("Failed to simulate claimable batch:", error);
+      const normalizedError = normalizeUnknownApiError(
+        error,
+        "Failed to simulate claimable amounts.",
+      );
+      sendApiError(
+        req,
+        res,
+        normalizedError.statusCode,
+        normalizedError.message,
+        { code: normalizedError.code ?? "INTERNAL_ERROR" },
+      );
+    }
+  },
+);
+
 app.get("/api/streams/:id", readLimiter, (req: Request, res: Response) => {
   const parsedId = parseStreamId(req.params.id);
   if (!parsedId.ok) {
@@ -522,7 +575,13 @@ app.get("/api/streams/:id", readLimiter, (req: Request, res: Response) => {
   });
 });
 
-
+app.get(
+  "/api/recipients/:accountId/streams",
+  readLimiter,
+  (req: Request, res: Response) => {
+    const parsedParams = recipientAccountIdSchema.safeParse({
+      accountId: req.params.accountId,
+    });
 
     if (!parsedParams.success) {
       sendValidationError(req, res, parsedParams.error.issues);
@@ -1225,9 +1284,7 @@ async function startServer() {
   if (config.sorobanEnabled && config.contractId) {
     initIndexer(config.rpcUrl, config.contractId, config.networkPassphrase);
     startIndexer(config.indexerPollIntervalMs);
-    startReconciliationJob(
-      Number(process.env.RECONCILIATION_INTERVAL_MS ?? 60000),
-    );
+    startReconciliationJob(config.reconciliationIntervalMs);
   } else {
     console.warn("CONTRACT_ID not set, event indexer will not start");
   }

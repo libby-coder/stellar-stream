@@ -80,3 +80,40 @@ export async function claimOnChain(
 
 export const claimStream = claimOnChain;
 
+export interface ClaimableBatchResponse {
+  amounts: Record<string, number>;
+  at: number;
+}
+
+/**
+ * Simulate on-chain claimable amounts for multiple streams via get_claimable_batch.
+ * Maximum 20 stream IDs per request (Soroban contract limit).
+ */
+export async function getClaimableBatch(
+  streamIds: string[],
+): Promise<ClaimableBatchResponse> {
+  const token = getAuthToken();
+
+  const response = await fetch(`${API_BASE}/streams/claimable/batch`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ streamIds }),
+  });
+
+  if (!response.ok) {
+    let message = `Failed to fetch claimable batch (${response.status})`;
+    try {
+      const body = (await response.json()) as { error?: string };
+      if (body.error) message = body.error;
+    } catch {
+      // ignore JSON parse errors
+    }
+    throw new Error(message);
+  }
+
+  return response.json() as Promise<ClaimableBatchResponse>;
+}
+

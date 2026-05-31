@@ -404,6 +404,7 @@ describe("validateEnv", () => {
       expect(config).toHaveProperty("serverSigningKey");
       expect(config).toHaveProperty("domain");
       expect(config).toHaveProperty("indexerPollIntervalMs");
+      expect(config).toHaveProperty("reconciliationIntervalMs");
       expect(config).toHaveProperty("adminApiKey");
     });
 
@@ -457,6 +458,43 @@ describe("validateEnv", () => {
       expect(exitSpy).toHaveBeenCalledWith(1);
       expect(consoleErrorSpy).toHaveBeenCalledWith(
         expect.stringContaining("INDEXER_POLL_INTERVAL_MS: must be a valid number >= 5000")
+      );
+    });
+
+    it("should use default RECONCILIATION_INTERVAL_MS of 60000ms", () => {
+      process.env = {
+        SOROBAN_DISABLED: "true",
+      };
+
+      const config = validateEnv();
+
+      expect(config.reconciliationIntervalMs).toBe(60000);
+    });
+
+    it("should accept valid RECONCILIATION_INTERVAL_MS", () => {
+      process.env = {
+        SOROBAN_DISABLED: "true",
+        RECONCILIATION_INTERVAL_MS: "120000",
+      };
+
+      const config = validateEnv();
+
+      expect(config.reconciliationIntervalMs).toBe(120000);
+    });
+
+    it("should enforce minimum RECONCILIATION_INTERVAL_MS of 10000ms", () => {
+      process.env = {
+        SOROBAN_DISABLED: "true",
+        RECONCILIATION_INTERVAL_MS: "5000",
+      };
+
+      try {
+        validateEnv();
+      } catch (e) { }
+
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      expect(consoleErrorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("RECONCILIATION_INTERVAL_MS: must be a valid number >= 10000")
       );
     });
   });

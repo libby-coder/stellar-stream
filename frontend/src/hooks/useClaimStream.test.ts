@@ -1,12 +1,19 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import { renderHook, waitFor, act } from "@testing-library/react";
 import { useClaimStream } from "./useClaimStream";
-import { claimStream, SorobanClaimError, ClaimResult } from "../services/soroban";
+import { useClaimBatch } from "./useClaimBatch";
+import {
+  claimStream,
+  getClaimableBatch,
+  SorobanClaimError,
+  ClaimResult,
+} from "../services/soroban";
 import type { StreamEvent } from "../services/api";
 
 // Mock the soroban module
 vi.mock("../services/soroban", () => ({
   claimStream: vi.fn(),
+  getClaimableBatch: vi.fn(),
   SorobanClaimError: class SorobanClaimError extends Error {
     code: string;
     constructor(message: string, code: string) {
@@ -18,6 +25,7 @@ vi.mock("../services/soroban", () => ({
 }));
 
 const mockClaimStream = vi.mocked(claimStream);
+const mockGetClaimableBatch = vi.mocked(getClaimableBatch);
 
 describe("useClaimStream", () => {
   beforeEach(() => {
@@ -372,6 +380,80 @@ describe("useClaimStream", () => {
       expect.objectContaining({ claimedAmount: 250.5 }), 
       mockHistory
     );
+  });
+
+  describe("useClaimBatch", () => {
+    it("fetches claimable batch and claims streams sequentially", async () => {
+      mockGetClaimableBatch.mockResolvedValue({
+        amounts: { "1": 100, "2": 50 },
+        at: 1716812160,
+      });
+
+      const mockResult = createMockClaimResult(100);
+      const mockHistory = createMockHistory();
+      mockClaimStream
+        .mockResolvedValueOnce({ result: mockResult, history: mockHistory })
+        .mockResolvedValueOnce({
+          result: { ...mockResult, claimedAmount: 50 },
+          history: mockHistory,
+        });
+
+      const onSuccess = vi.fn();
+
+      const { result } = renderHook(() => useClaimBatch(onSuccess));
+
+      let claimable: { streamId: string; amount: number; assetCode: string }[] = [];
+      await act(async () => {
+        claimable = await result.current.fetchClaimable([
+          { streamId: "1", amount: 0, assetCode: "XLM" },
+          { streamId: "2", amount: 0, assetCode: "XLM" },
+        ]);
+      });
+
+      expect(mockGetClaimableBatch).toHaveBeenCalledWith(["1", "2"]);
+      expect(claimable).toHaveLength(2);
+      expect(result.current.state.totalClaimable).toBe(150);
+      expect(result.current.state.phase).toBe("ready");
+
+      await act(async () => {
+        await result.current.executeBatch(claimable, "GTEST123456789");
+      });
+
+      expect(mockClaimStream).toHaveBeenCalledTimes(2);
+      expect(mockClaimStream).toHaveBeenNthCalledWith(1, "1", "GTEST123456789", 100);
+      expect(mockClaimStream).toHaveBeenNthCalledWith(2, "2", "GTEST123456789", 50);
+      expect(onSuccess).toHaveBeenCalledTimes(2);
+      expect(result.current.state.phase).toBe("complete");
+      expect(result.current.state.successCount).toBe(2);
+    });
+
+    it("records failures in batch summary state", async () => {
+      mockGetClaimableBatch.mockResolvedValue({
+        amounts: { "1": 100 },
+        at: 1716812160,
+      });
+
+      mockClaimStream.mockRejectedValue(new Error("Network error"));
+
+      const onSuccess = vi.fn();
+      const { result } = renderHook(() => useClaimBatch(onSuccess));
+
+      let claimable: { streamId: string; amount: number; assetCode: string }[] = [];
+      await act(async () => {
+        claimable = await result.current.fetchClaimable([
+          { streamId: "1", amount: 0, assetCode: "XLM" },
+        ]);
+      });
+
+      await act(async () => {
+        await result.current.executeBatch(claimable, "GTEST123456789");
+      });
+
+      expect(result.current.state.failures).toEqual([
+        { streamId: "1", message: "Network error" },
+      ]);
+      expect(result.current.state.successCount).toBe(0);
+    });
   });
 
   it("clears error state on successful retry", async () => {

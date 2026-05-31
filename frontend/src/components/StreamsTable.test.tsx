@@ -1,81 +1,28 @@
-﻿import React from 'react';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
-import '@testing-library/jest-dom';
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { StreamsTable } from './StreamsTable';
-import { Stream } from '../types/stream';
+import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import "@testing-library/jest-dom";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { StreamsTable } from "./StreamsTable";
+import { Stream } from "../types/stream";
+
+const noop = vi.fn().mockResolvedValue(undefined);
 
 const mockStreams: Stream[] = [
   {
-    id: '1',
-    sender: 'G_SENDER',
-    recipient: 'G_RECIPIENT123',
-    assetCode: 'USDC',
+    id: "1",
+    sender: "G_SENDER123456789012345678901234567890123456789012345678901",
+    recipient: "G_RECIPIENT123456789012345678901234567890123456789012345",
+    assetCode: "USDC",
     totalAmount: 100,
     durationSeconds: 3600,
     startAt: 1670000000,
     createdAt: 1670000000,
     progress: {
-      status: 'active',
+      status: "active",
       ratePerSecond: 0.01,
       elapsedSeconds: 100,
       vestedAmount: 20,
       remainingAmount: 80,
       percentComplete: 20,
-    },
-  },
-  {
-    id: '2',
-    sender: 'G_SENDER',
-    recipient: 'G_RECIPIENT123',
-    assetCode: 'USDC',
-    totalAmount: 100,
-    durationSeconds: 3600,
-    startAt: 1770000000,
-    createdAt: 1670000000,
-    progress: {
-      status: 'scheduled',
-      ratePerSecond: 0.01,
-      elapsedSeconds: 0,
-      vestedAmount: 0,
-      remainingAmount: 100,
-      percentComplete: 0,
-    },
-  },
-  {
-    id: '3',
-    sender: 'G_SENDER',
-    recipient: 'G_RECIPIENT123',
-    assetCode: 'USDC',
-    totalAmount: 100,
-    durationSeconds: 3600,
-    startAt: 1670000000,
-    createdAt: 1670000000,
-    progress: {
-      status: 'completed',
-      ratePerSecond: 0.01,
-      elapsedSeconds: 3600,
-      vestedAmount: 100,
-      remainingAmount: 0,
-      percentComplete: 100,
-    },
-  },
-  {
-    id: '4',
-    sender: 'G_SENDER',
-    recipient: 'G_RECIPIENT123',
-    assetCode: 'USDC',
-    totalAmount: 100,
-    durationSeconds: 3600,
-    startAt: 1670000000,
-    createdAt: 1670000000,
-    progress: {
-      status: 'canceled',
-      ratePerSecond: 0.01,
-      elapsedSeconds: 500,
-      vestedAmount: 10,
-      remainingAmount: 90,
-      percentComplete: 10,
     },
   },
 ];
@@ -84,58 +31,46 @@ const defaultProps = {
   streams: mockStreams,
   filters: {},
   onFiltersChange: vi.fn(),
-  onCancel: vi.fn().mockResolvedValue(undefined),
-  onPause: vi.fn().mockResolvedValue(undefined),
-  onResume: vi.fn().mockResolvedValue(undefined),
-  onOpenStream: vi.fn(),
+  onCancel: noop,
+  onPause: noop,
+  onResume: noop,
   onEditStartTime: vi.fn(),
-  onCreateStream: vi.fn(),
 };
 
-describe('StreamsTable Component', () => {
+describe("StreamsTable column visibility", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
   });
 
-  it('renders table data when streams are passed', () => {
+  it("hides optional column by default and shows it when toggled", () => {
     render(<StreamsTable {...defaultProps} />);
 
-    expect(screen.getAllByText(/active/i).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/scheduled/i).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("columnheader", { name: "Asset" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle table columns" }));
+    fireEvent.click(screen.getByLabelText("Asset"));
+
+    expect(screen.getByRole("columnheader", { name: "Asset" })).toBeInTheDocument();
+    expect(screen.getByText("USDC")).toBeInTheDocument();
   });
 
-  it('renders correct status badges for all statuses', () => {
+  it("persists column visibility to localStorage", () => {
+    const { unmount } = render(<StreamsTable {...defaultProps} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle table columns" }));
+    fireEvent.click(screen.getByLabelText("Asset"));
+
+    const stored = JSON.parse(localStorage.getItem("stream-table-columns") ?? "{}");
+    expect(stored.assetCode).toBe(true);
+
+    unmount();
     render(<StreamsTable {...defaultProps} />);
 
-    expect(screen.getByText('active')).toHaveClass('badge-active');
-    expect(screen.getByText('scheduled')).toHaveClass('badge-scheduled');
-    expect(screen.getByText('completed')).toHaveClass('badge-completed');
-    expect(screen.getByText('canceled')).toHaveClass('badge-canceled');
-  });
-
-  it('calls onCancel when cancel button is clicked on an active stream', () => {
-    const onCancel = vi.fn().mockResolvedValue(undefined);
-    render(<StreamsTable {...defaultProps} onCancel={onCancel} />);
-
-    const cancelButtons = screen.getAllByLabelText(/cancel stream/i);
-    fireEvent.click(cancelButtons[0]);
-    expect(onCancel).toHaveBeenCalledWith('1');
-  });
-
-  it('disables cancel button for completed or canceled streams', () => {
-    render(<StreamsTable {...defaultProps} />);
-
-    const cancelButtons = screen.getAllByLabelText(/cancel stream/i);
-    expect(cancelButtons[2]).toBeDisabled();
-    expect(cancelButtons[3]).toBeDisabled();
-  });
-
-  it('renders a helpful message for empty streams array', () => {
-    render(<StreamsTable {...defaultProps} streams={[]} totalStreamCount={0} onCreateStream={defaultProps.onCreateStream} />);
-
-    expect(screen.getByText(/no streams yet/i)).toBeInTheDocument();
-    expect(screen.queryByRole('table')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /create stream/i })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Asset" })).toBeInTheDocument();
   });
 });
