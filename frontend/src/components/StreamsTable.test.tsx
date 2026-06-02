@@ -1,115 +1,143 @@
-import React from 'react';
-import { render, screen, cleanup, fireEvent } from '@testing-library/react';
-import '@testing-library/jest-dom';
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { StreamsTable } from '../components/StreamsTable';
-import { Stream } from '../types/stream';
+import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import "@testing-library/jest-dom";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { StreamsTable, STREAMS_TABLE_VIRTUAL_OVERSCAN } from "./StreamsTable";
+import { Stream } from "../types/stream";
 
-const noop = () => {};
-import { StreamsTable } from './StreamsTable'; 
-import { Stream } from '../types/stream'; 
+const noop = vi.fn().mockResolvedValue(undefined);
 
-const noop = vi.fn();
-
-const mockStreams: Stream[] = [
-  {
-    id: '1',
-    sender: 'G_SENDER',
-    recipient: 'G_RECIPIENT123',
-    assetCode: 'USDC',
+function createMockStream(id: string, status: Stream["progress"]["status"] = "active"): Stream {
+  return {
+    id,
+    sender: "G_SENDER123456789012345678901234567890123456789012345678901",
+    recipient: "G_RECIPIENT123456789012345678901234567890123456789012345",
+    assetCode: "USDC",
     totalAmount: 100,
     durationSeconds: 3600,
     startAt: 1670000000,
     createdAt: 1670000000,
     progress: {
-      status: 'active',
+      status,
       ratePerSecond: 0.01,
       elapsedSeconds: 100,
       vestedAmount: 20,
       remainingAmount: 80,
       percentComplete: 20,
     },
-  },
-  {
-    id: '2',
-    sender: 'G_SENDER',
-    recipient: 'G_RECIPIENT123',
-    assetCode: 'USDC',
-    totalAmount: 100,
-    durationSeconds: 3600,
-    startAt: 1770000000,
-    createdAt: 1670000000,
-    progress: {
-      status: 'scheduled',
-      ratePerSecond: 0.01,
-      elapsedSeconds: 0,
-      vestedAmount: 0,
-      remainingAmount: 100,
-      percentComplete: 0,
-    },
-  },
-  {
-    id: '3',
-    sender: 'G_SENDER',
-    recipient: 'G_RECIPIENT123',
-    assetCode: 'USDC',
-    totalAmount: 100,
-    durationSeconds: 3600,
-    startAt: 1670000000,
-    createdAt: 1670000000,
-    progress: {
-      status: 'completed',
-      ratePerSecond: 0.01,
-      elapsedSeconds: 3600,
-      vestedAmount: 100,
-      remainingAmount: 0,
-      percentComplete: 100,
-    },
-  },
-  {
-    id: '4',
-    sender: 'G_SENDER',
-    recipient: 'G_RECIPIENT123',
-    assetCode: 'USDC',
-    totalAmount: 100,
-    durationSeconds: 3600,
-    startAt: 1670000000,
-    createdAt: 1670000000,
-    progress: {
-      status: 'canceled',
-      ratePerSecond: 0.01,
-      elapsedSeconds: 500,
-      vestedAmount: 10,
-      remainingAmount: 90,
-      percentComplete: 10,
-    },
-  },
-];
+  };
+}
+
+const mockStreams: Stream[] = [createMockStream("1")];
 
 const defaultProps = {
   streams: mockStreams,
   filters: {},
   onFiltersChange: vi.fn(),
-  onCancel: vi.fn().mockResolvedValue(undefined),
-
+  onCancel: noop,
+  onPause: noop,
+  onResume: noop,
+  onEditStartTime: vi.fn(),
 };
 
-describe('StreamsTable Component', () => {
+function setScrollViewport(element: HTMLElement, height: number) {
+  Object.defineProperty(element, "clientHeight", {
+    configurable: true,
+    value: height,
+  });
+  Object.defineProperty(element, "offsetHeight", {
+    configurable: true,
+    value: height,
+  });
+  Object.defineProperty(element, "scrollHeight", {
+    configurable: true,
+    value: height * 20,
+  });
+}
+
+describe("StreamsTable column visibility", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
   afterEach(() => {
     cleanup();
+    vi.clearAllMocks();
   });
-  it('renders table data when streams are passed', () => {
-    render(
-      <StreamsTable 
 
-      />
+  it("hides optional column by default and shows it when toggled", () => {
+    render(<StreamsTable {...defaultProps} />);
+
+    expect(screen.queryByRole("columnheader", { name: "Asset" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle table columns" }));
+    fireEvent.click(screen.getByLabelText("Asset"));
+
+    expect(screen.getByRole("columnheader", { name: "Asset" })).toBeInTheDocument();
+    expect(screen.getByText("USDC")).toBeInTheDocument();
+  });
+
+  it("persists column visibility to localStorage", () => {
+    const { unmount } = render(<StreamsTable {...defaultProps} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Toggle table columns" }));
+    fireEvent.click(screen.getByLabelText("Asset"));
+
+    const stored = JSON.parse(localStorage.getItem("stream-table-columns") ?? "{}");
+    expect(stored.assetCode).toBe(true);
+
+    unmount();
+    render(<StreamsTable {...defaultProps} />);
+
+    expect(screen.getByRole("columnheader", { name: "Asset" })).toBeInTheDocument();
+  });
+});
+
+describe("StreamsTable virtual scrolling", () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  it("uses a bounded scroll container for the table body", () => {
+    render(<StreamsTable {...defaultProps} />);
+
+    const scrollContainer = screen.getByTestId("streams-table-scroll");
+    expect(scrollContainer).toHaveClass("streams-table-scroll");
+    expect(scrollContainer.getAttribute("style")).toContain("max-height");
+  });
+
+  it("renders only visible rows plus overscan for large lists", () => {
+    const manyStreams = Array.from({ length: 500 }, (_, i) =>
+      createMockStream(String(i + 1).padStart(4, "0")),
     );
-    
-    // Checking for text elements populated by the array map
-    expect(screen.getAllByTitle('G_RECIPIENT123').length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/active/i).length).toBeGreaterThan(0);
+
+    const view = render(<StreamsTable {...defaultProps} streams={manyStreams} />);
+    setScrollViewport(screen.getByTestId("streams-table-scroll"), 400);
+    view.rerender(<StreamsTable {...defaultProps} streams={manyStreams} />);
+
+    const renderedRows = screen.getAllByRole("checkbox", {
+      name: /^Select stream /,
+    });
+    const expectedMax =
+      Math.ceil(400 / 52) + STREAMS_TABLE_VIRTUAL_OVERSCAN + 2;
+
+    expect(renderedRows.length).toBeLessThan(500);
+    expect(renderedRows.length).toBeLessThanOrEqual(expectedMax);
   });
 
+  it("configures virtual overscan to five rows", () => {
+    expect(STREAMS_TABLE_VIRTUAL_OVERSCAN).toBe(5);
+  });
 
+  it("preserves keyboard focus order for rendered row actions", () => {
+    render(<StreamsTable {...defaultProps} />);
+
+    const cancelButton = screen.getByRole("button", { name: "Cancel stream 1" });
+    cancelButton.focus();
+    expect(document.activeElement).toBe(cancelButton);
   });
 });

@@ -9,12 +9,14 @@ import {
   TransactionBuilder,
   Networks,
   Account,
+  xdr,
 } from "@stellar/stellar-sdk";
 import pLimit from "p-limit";
 import { initDb, getDb } from "./db";
 import { recordEventWithDb } from "./eventHistory";
 import { streamHasEvent } from "./eventHistory";
 import { triggerWebhook } from "./webhook";
+import { initCache, getCache } from "./cache";
 
 export type StreamStatus = "scheduled" | "active" | "paused" | "completed" | "canceled";
 
@@ -25,6 +27,11 @@ export interface StreamInput {
   totalAmount: number;
   durationSeconds: number;
   startAt?: number;
+}
+
+export interface StreamFeeEstimate {
+  feeStroops: number;
+  feeXlm: string;
 }
 
 export interface StreamRecord {
@@ -84,7 +91,6 @@ function rowToRecord(row: StreamRow): StreamRecord {
     refundedAmount: row.refunded_amount ?? undefined,
     pausedAt: row.paused_at ?? undefined,
     pausedDuration: row.paused_duration ?? 0,
-    pausedDuration: row.paused_duration,
   };
 }
 
@@ -136,8 +142,15 @@ function listLocalStreamIds(): Set<string> {
 let rpcServer: rpc.Server | null = null;
 let serverKeypair: Keypair | null = null;
 
+/**
+ * Initializes Soroban RPC connection and database.
+ * Must be called before any stream operations.
+ * Reads RPC_URL and SERVER_PRIVATE_KEY from environment variables.
+ * @throws {Error} If database initialization fails
+ */
 export async function initSoroban() {
   initDb();
+  initCache();
 
   const rpcUrl =
     process.env.RPC_URL || "https://soroban-testnet.stellar.org:443";
@@ -152,7 +165,7 @@ export async function initSoroban() {
   }
 }
 
-function nowInSeconds(): number {
+export function nowInSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
@@ -165,34 +178,19 @@ interface CacheEntry<T> {
   expiresAt: number;
 }
 
-const rpcCache = new Map<string, CacheEntry<any>>();
-
-function getCached<T>(key: string): T | null {
-  const entry = rpcCache.get(key);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    rpcCache.delete(key);
-    return null;
-  }
-  return entry.data;
+async function getCached<T>(key: string): Promise<T | null> {
+  return getCache().get<T>(key);
 }
 
-function setCached<T>(key: string, data: T, ttlSeconds = 5): void {
-  rpcCache.set(key, {
-    data,
-    expiresAt: Date.now() + ttlSeconds * 1000,
-  });
+async function setCached<T>(key: string, data: T, ttlSeconds = 5): Promise<void> {
+  return getCache().set<T>(key, data, ttlSeconds);
 }
 
-function invalidateCache(pattern?: string): void {
+async function invalidateCache(pattern?: string): Promise<void> {
   if (!pattern) {
-    rpcCache.clear();
+    await getCache().clear();
   } else {
-    for (const key of rpcCache.keys()) {
-      if (key.includes(pattern)) {
-        rpcCache.delete(key);
-      }
-    }
+    await getCache().del(pattern);
   }
 }
 
@@ -270,6 +268,41 @@ async function simulateContractCall(
   return rpcServer.simulateTransaction(tx);
 }
 
+const STROOPS_PER_XLM = 10_000_000;
+
+function formatStroopsAsXlm(stroops: number): string {
+  return (stroops / STROOPS_PER_XLM).toFixed(7);
+}
+
+function createStreamOperation(contractId: string, input: StreamInput, startAt: number) {
+  const endAt = startAt + input.durationSeconds;
+  const fakeToken = contractId;
+
+  return new Contract(contractId).call(
+    "create_stream",
+    new Address(input.sender).toScVal(),
+    new Address(input.recipient).toScVal(),
+    new Address(fakeToken).toScVal(),
+    nativeToScVal(input.totalAmount, { type: "i128" }),
+    nativeToScVal(startAt, { type: "u64" }),
+    nativeToScVal(endAt, { type: "u64" }),
+  );
+}
+
+function readSimulationFeeStroops(simRes: rpc.Api.SimulateTransactionResponse): number {
+  const rawFee =
+    (simRes as any).minResourceFee ??
+    (simRes as any).feeCharged ??
+    (simRes as any).result?.minResourceFee;
+  const feeStroops = Number(rawFee);
+
+  if (!Number.isFinite(feeStroops) || feeStroops < 0) {
+    throw new Error("Soroban RPC simulation did not return a valid fee estimate.");
+  }
+
+  return feeStroops;
+}
+
 async function fetchNextOnChainStreamId(
   contract: Contract,
   sourceAccount: Account,
@@ -294,7 +327,7 @@ async function fetchOnChainStreamRecord(
   id: number,
 ): Promise<StreamRecord | null> {
   const cacheKey = `stream:${id}`;
-  const cached = getCached<StreamRecord>(cacheKey);
+  const cached = await getCached<StreamRecord>(cacheKey);
   if (cached) {
     return cached;
   }
@@ -326,7 +359,7 @@ async function fetchOnChainStreamRecord(
     pausedDuration: Number(streamData.paused_duration ?? 0),
   };
 
-  setCached(cacheKey, result, 5);
+  await setCached(cacheKey, result, 5);
   return result;
 }
 
@@ -367,41 +400,34 @@ function computeStatus(stream: StreamRecord, at: number): StreamStatus {
   if (at < stream.startAt) {
     return "scheduled";
   }
-  if (at >= stream.startAt + stream.durationSeconds) {
+  if (at >= stream.startAt + stream.durationSeconds + stream.pausedDuration) {
     return "completed";
-  }
-  if (stream.pausedAt !== undefined) {
-    return "active"; // Or could be a "paused" status if we want to add it
   }
   return "active";
 }
 
+/**
+ * Calculates the current progress of a stream.
+ * Accounts for paused duration and cancellation state.
+ * @param {StreamRecord} stream - The stream to calculate progress for
+ * @param {number} [at=nowInSeconds()] - Unix timestamp to calculate progress at (defaults to current time)
+ * @returns {StreamProgress} Progress metrics including status, vested amount, and percentage complete
+ */
 export function calculateProgress(
   stream: StreamRecord,
   at = nowInSeconds(),
 ): StreamProgress {
-  const streamEnd = stream.startAt + stream.durationSeconds;
 
-  // Calculate paused duration including current pause if active
-  let pausedDuration = stream.pausedDuration;
-  if (stream.pausedAt !== undefined) {
-    pausedDuration += Math.max(0, at - stream.pausedAt);
   }
 
-  const effectiveEnd =
-    stream.canceledAt !== undefined
-      ? Math.min(stream.canceledAt, streamEnd)
-      : streamEnd;
+  const streamEnd = stream.startAt + stream.durationSeconds;
 
   // When paused, vesting is frozen at the moment of pause.
   const effectiveAt =
     stream.pausedAt !== undefined ? Math.min(at, stream.pausedAt) : at;
 
-  const elapsed = Math.max(0, Math.min(effectiveAt, effectiveEnd) - stream.startAt);
-      ?Math.min(stream.canceledAt, streamEnd + pausedDuration)
-      : streamEnd + pausedDuration;
 
-  const elapsed = Math.max(0, Math.min(at, effectiveEnd) - stream.startAt - pausedDuration);
+
   const ratio = Math.min(1, elapsed / stream.durationSeconds);
   const vestedAmount = stream.totalAmount * ratio;
 
@@ -413,6 +439,106 @@ export function calculateProgress(
     remainingAmount: round(Math.max(0, stream.totalAmount - vestedAmount)),
     percentComplete: round(ratio * 100),
   };
+}
+
+export async function getOnChainClaimableAmount(
+  id: string,
+): Promise<{ claimableAmount: number; at: number }> {
+  const sorobanContext = getSorobanContext();
+  if (!sorobanContext || !rpcServer) {
+    throw new Error("Soroban RPC server is not initialized.");
+  }
+
+  const sourceAccount = await sorobanContext.sourceAccountPromise;
+  const latestLedger = await rpcServer.getLatestLedger();
+  const at = latestLedger.closeTime ? parseInt(latestLedger.closeTime, 10) : Math.floor(Date.now() / 1000);
+
+  const simRes = await simulateContractCall(
+    sorobanContext.contract,
+    sourceAccount,
+    "claimable",
+    nativeToScVal(parseInt(id), { type: "u64" }),
+    nativeToScVal(at, { type: "u64" }),
+  );
+
+  if (!rpc.Api.isSimulationSuccess(simRes) || !simRes.result) {
+    throw new Error("Simulation failed: " + JSON.stringify(simRes));
+  }
+
+  const claimableAmount = Number(scValToNative(simRes.result.retval));
+  return { claimableAmount, at };
+}
+
+const MAX_CLAIMABLE_BATCH_SIZE = 20;
+
+function parseClaimableBatchMap(native: unknown): Record<string, number> {
+  const result: Record<string, number> = {};
+  if (native instanceof Map) {
+    for (const [key, value] of native.entries()) {
+      result[String(key)] = Number(value);
+    }
+    return result;
+  }
+  if (native && typeof native === "object") {
+    for (const [key, value] of Object.entries(native as Record<string, unknown>)) {
+      result[String(key)] = Number(value);
+    }
+  }
+  return result;
+}
+
+export async function getOnChainClaimableBatch(
+  ids: string[],
+): Promise<{ amounts: Record<string, number>; at: number }> {
+  if (ids.length === 0) {
+    const at = await getLatestLedgerTime();
+    return { amounts: {}, at };
+  }
+  if (ids.length > MAX_CLAIMABLE_BATCH_SIZE) {
+    throw new Error(`Too many stream IDs (max ${MAX_CLAIMABLE_BATCH_SIZE})`);
+  }
+
+  const sorobanContext = getSorobanContext();
+  if (!sorobanContext || !rpcServer) {
+    throw new Error("Soroban RPC server is not initialized.");
+  }
+
+  const sourceAccount = await sorobanContext.sourceAccountPromise;
+  const latestLedger = await rpcServer.getLatestLedger();
+  const at = latestLedger.closeTime
+    ? parseInt(latestLedger.closeTime, 10)
+    : Math.floor(Date.now() / 1000);
+
+  const streamIdVec = xdr.ScVal.scvVec(
+    ids.map((id) => nativeToScVal(parseInt(id, 10), { type: "u64" })),
+  );
+
+  const simRes = await simulateContractCall(
+    sorobanContext.contract,
+    sourceAccount,
+    "get_claimable_batch",
+    streamIdVec,
+    nativeToScVal(at, { type: "u64" }),
+  );
+
+  if (!rpc.Api.isSimulationSuccess(simRes) || !simRes.result) {
+    throw new Error("Simulation failed: " + JSON.stringify(simRes));
+  }
+
+  const amounts = parseClaimableBatchMap(scValToNative(simRes.result.retval));
+  return { amounts, at };
+}
+
+export async function getLatestLedgerTime(): Promise<number> {
+  if (!rpcServer) {
+    return Math.floor(Date.now() / 1000);
+  }
+  try {
+    const latestLedger = await rpcServer.getLatestLedger();
+    return latestLedger.closeTime ? parseInt(latestLedger.closeTime, 10) : Math.floor(Date.now() / 1000);
+  } catch (e) {
+    return Math.floor(Date.now() / 1000);
+  }
 }
 
 export async function syncStreams() {
@@ -484,6 +610,13 @@ export async function syncStreams() {
   }
 }
 
+/**
+ * Reconciles missing streams by comparing local database with on-chain state.
+ * Backfills any streams that exist on-chain but not locally.
+ * Records "created" events for backfilled streams.
+ * @async
+ * @returns {Promise<number>} Number of streams repaired
+ */
 export async function reconcileMissingStreams(): Promise<number> {
   const sorobanContext = getSorobanContext();
   if (!sorobanContext) {
@@ -557,6 +690,15 @@ export async function reconcileMissingStreams(): Promise<number> {
   }
 }
 
+/**
+ * Creates a new stream on-chain and persists it locally.
+ * Sends transaction to Soroban contract and records "created" event.
+ * Triggers webhook notification after successful persistence.
+ * @async
+ * @param {StreamInput} input - Stream creation parameters (sender, recipient, amount, duration, etc.)
+ * @returns {Promise<StreamRecord>} The created stream record
+ * @throws {Error} If Soroban is not configured or transaction fails
+ */
 export async function createStream(input: StreamInput): Promise<StreamRecord> {
   const startAt = input.startAt ?? nowInSeconds();
   const contractId = process.env.CONTRACT_ID;
@@ -567,23 +709,8 @@ export async function createStream(input: StreamInput): Promise<StreamRecord> {
     throw new Error("Backend not configured for Soroban.");
   }
 
-  const contract = new Contract(contractId);
-  const endAt = startAt + input.durationSeconds;
-
-  // Let's create an arbitrary testnet asset code for the token
-  const fakeToken = contractId;
-
   const sourceAccount = await rpcServer.getAccount(serverKeypair.publicKey());
-
-  const tx = new Contract(contractId).call(
-    "create_stream",
-    new Address(input.sender).toScVal(),
-    new Address(input.recipient).toScVal(),
-    new Address(fakeToken).toScVal(),
-    nativeToScVal(input.totalAmount, { type: "i128" }),
-    nativeToScVal(startAt, { type: "u64" }),
-    nativeToScVal(endAt, { type: "u64" }),
-  );
+  const tx = createStreamOperation(contractId, input, startAt);
 
   // We have to build and send this tx. Wait, doing this properly via building is long:
   const built = await rpcServer.prepareTransaction(
@@ -651,7 +778,7 @@ export async function createStream(input: StreamInput): Promise<StreamRecord> {
   })();
 
   // Invalidate cache to ensure freshness after stream creation
-  invalidateCache("stream:");
+  await invalidateCache("stream:");
 
   // Webhook fires after the transaction commits — a webhook failure
   // must never roll back an already-persisted stream.
@@ -659,103 +786,37 @@ export async function createStream(input: StreamInput): Promise<StreamRecord> {
   return stream;
 }
 
-export async function pauseStream(id: string): Promise<StreamRecord | undefined> {
-  const stream = getStream(id);
-  if (!stream || stream.pausedAt !== undefined || stream.canceledAt !== undefined || stream.completedAt !== undefined) {
-    return stream;
+export async function estimateCreateStreamFee(input: StreamInput): Promise<StreamFeeEstimate> {
+  const startAt = input.startAt ?? nowInSeconds();
+  const contractId = process.env.CONTRACT_ID;
+  const netPass =
+    process.env.NETWORK_PASSPHRASE || "Test SDF Network ; September 2015";
+
+  if (!contractId || !rpcServer || !serverKeypair) {
+    throw new Error("Backend not configured for Soroban.");
   }
 
-  const sorobanContext = getSorobanContext();
-  if (sorobanContext && rpcServer && serverKeypair) {
-    const sourceAccount = await rpcServer.getAccount(serverKeypair.publicKey());
-    const tx = sorobanContext.contract.call(
-      "pause_stream",
-      nativeToScVal(parseInt(id), { type: "u64" }),
-    );
+  const sourceAccount = await rpcServer.getAccount(serverKeypair.publicKey());
+  const tx = new TransactionBuilder(sourceAccount, {
+    fee: "1000",
+    networkPassphrase: netPass,
+  })
+    .addOperation(createStreamOperation(contractId, input, startAt))
+    .setTimeout(30)
+    .build();
 
-    const built = await rpcServer.prepareTransaction(
-      new TransactionBuilder(sourceAccount, {
-        fee: "1000",
-        networkPassphrase: process.env.NETWORK_PASSPHRASE || Networks.TESTNET,
-      })
-        .addOperation(tx)
-        .setTimeout(30)
-        .build(),
-    );
-
-    built.sign(serverKeypair);
-    const sendRes = await retryWithBackoff(() => rpcServer!.sendTransaction(built));
-    if (sendRes.status === "PENDING") {
-      let txResult;
-      let attempts = 0;
-      while (attempts < 10) {
-        txResult = await retryWithBackoff(() => rpcServer!.getTransaction(sendRes.hash));
-        if (txResult.status !== "NOT_FOUND") break;
-        await new Promise((r) => setTimeout(r, 1000));
-        attempts++;
-      }
-    }
+  const simRes = await rpcServer.simulateTransaction(tx);
+  if (!rpc.Api.isSimulationSuccess(simRes)) {
+    throw new Error("Soroban RPC simulation failed.");
   }
 
-  const now = nowInSeconds();
-  const db = getDb();
-  db.prepare("UPDATE streams SET paused_at = ? WHERE id = ?").run(now, id);
-
-  invalidateCache(`stream:${id}`);
-  return getStream(id);
+  const feeStroops = readSimulationFeeStroops(simRes);
+  return {
+    feeStroops,
+    feeXlm: formatStroopsAsXlm(feeStroops),
+  };
 }
 
-export async function resumeStream(id: string): Promise<StreamRecord | undefined> {
-  const stream = getStream(id);
-  if (!stream || stream.pausedAt === undefined) {
-    return stream;
-  }
-
-  const sorobanContext = getSorobanContext();
-  if (sorobanContext && rpcServer && serverKeypair) {
-    const sourceAccount = await rpcServer.getAccount(serverKeypair.publicKey());
-    const tx = sorobanContext.contract.call(
-      "resume_stream",
-      nativeToScVal(parseInt(id), { type: "u64" }),
-    );
-
-    const built = await rpcServer.prepareTransaction(
-      new TransactionBuilder(sourceAccount, {
-        fee: "1000",
-        networkPassphrase: process.env.NETWORK_PASSPHRASE || Networks.TESTNET,
-      })
-        .addOperation(tx)
-        .setTimeout(30)
-        .build(),
-    );
-
-    built.sign(serverKeypair);
-    const sendRes = await retryWithBackoff(() => rpcServer!.sendTransaction(built));
-    if (sendRes.status === "PENDING") {
-      let txResult;
-      let attempts = 0;
-      while (attempts < 10) {
-        txResult = await retryWithBackoff(() => rpcServer!.getTransaction(sendRes.hash));
-        if (txResult.status !== "NOT_FOUND") break;
-        await new Promise((r) => setTimeout(r, 1000));
-        attempts++;
-      }
-    }
-  }
-
-  const now = nowInSeconds();
-  const additionalPausedDuration = Math.max(0, now - stream.pausedAt);
-  const newTotalPausedDuration = stream.pausedDuration + additionalPausedDuration;
-
-  const db = getDb();
-  db.prepare("UPDATE streams SET paused_at = NULL, paused_duration = ? WHERE id = ?").run(
-    newTotalPausedDuration,
-    id,
-  );
-
-  invalidateCache(`stream:${id}`);
-  return getStream(id);
-}
 
 export function refreshStreamStatuses(): number {
   const db = getDb();
@@ -764,14 +825,14 @@ export function refreshStreamStatuses(): number {
 
   const toComplete = db.prepare(`
     SELECT * FROM streams 
-    WHERE canceled_at IS NULL AND completed_at IS NULL
+    WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
       AND (start_at + duration_seconds) <= ?
   `).all() as StreamRow[];
 
 
   const result = db.prepare(`
     UPDATE streams SET completed_at = ?
-    WHERE canceled_at IS NULL AND completed_at IS NULL
+    WHERE canceled_at IS NULL AND completed_at IS NULL AND paused_at IS NULL
       AND (start_at + duration_seconds) <= ?
   `).run(now, now);
 
@@ -792,6 +853,12 @@ export function refreshStreamStatuses(): number {
   return result.changes;
 }
 
+/**
+ * Archives completed streams older than 30 days.
+ * Moves archived streams to stream_archive table and marks them in main table.
+ * @async
+ * @returns {Promise<number>} Number of streams archived
+ */
 export async function archiveOldStreams(): Promise<number> {
   const db = getDb();
   const thirtyDaysAgo = nowInSeconds() - 30 * 24 * 60 * 60;
@@ -856,6 +923,11 @@ export async function archiveOldStreams(): Promise<number> {
   }
 }
 
+/**
+ * Lists all streams from the database.
+ * @param {boolean} [includeArchived=false] - Whether to include archived streams
+ * @returns {StreamRecord[]} Array of stream records sorted by creation date (newest first)
+ */
 export function listStreams(includeArchived = false): StreamRecord[] {
   const db = getDb();
   const query = includeArchived
@@ -865,6 +937,11 @@ export function listStreams(includeArchived = false): StreamRecord[] {
   return rows.map(rowToRecord);
 }
 
+/**
+ * Lists all streams where the given address is the recipient.
+ * @param {string} recipientAddress - Stellar account address to filter by
+ * @returns {StreamRecord[]} Array of stream records sorted by creation date (newest first)
+ */
 export function listStreamsByRecipient(recipientAddress: string): StreamRecord[] {
   const db = getDb();
   const rows = db
@@ -873,6 +950,11 @@ export function listStreamsByRecipient(recipientAddress: string): StreamRecord[]
   return rows.map(rowToRecord);
 }
 
+/**
+ * Lists all streams where the given address is the sender.
+ * @param {string} senderAddress - Stellar account address to filter by
+ * @returns {StreamRecord[]} Array of stream records sorted by creation date (newest first)
+ */
 export function listStreamsBySender(senderAddress: string): StreamRecord[] {
   const db = getDb();
   const rows = db
@@ -881,6 +963,11 @@ export function listStreamsBySender(senderAddress: string): StreamRecord[] {
   return rows.map(rowToRecord);
 }
 
+/**
+ * Retrieves a single stream by ID.
+ * @param {string} id - Stream ID
+ * @returns {StreamRecord | undefined} The stream record, or undefined if not found
+ */
 export function getStream(id: string): StreamRecord | undefined {
   const db = getDb();
   const row = db.prepare("SELECT * FROM streams WHERE id = ?").get(id) as
@@ -889,6 +976,14 @@ export function getStream(id: string): StreamRecord | undefined {
   return row ? rowToRecord(row) : undefined;
 }
 
+/**
+ * Cancels a stream and records the cancellation event.
+ * Attempts to retrieve refund amount from on-chain cancel transaction.
+ * Triggers webhook notification after successful cancellation.
+ * @async
+ * @param {string} id - Stream ID to cancel
+ * @returns {Promise<StreamRecord | undefined>} The updated stream record, or undefined if not found
+ */
 export async function cancelStream(
   id: string,
 ): Promise<StreamRecord | undefined> {
@@ -954,7 +1049,7 @@ export async function cancelStream(
   }
 
   // Invalidate cache
-  invalidateCache(`stream:${id}`);
+  await invalidateCache(`stream:${id}`);
 
   // Atomically write the updated stream row and the cancellation event.
   const db = getDb();
@@ -968,65 +1063,16 @@ export async function cancelStream(
   return stream;
 }
 
-export function pauseStream(id: string): StreamRecord {
-  const stream = getStream(id);
-  if (!stream) {
-    const err: any = new Error("Stream not found.");
-    err.statusCode = 404;
-    throw err;
-  }
 
-  const status = computeStatus(stream, nowInSeconds());
-  if (status !== "active") {
-    const err: any = new Error("Only active streams can be paused.");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  stream.pausedAt = nowInSeconds();
-  const db = getDb();
-  db.transaction(() => {
-    upsertStream(stream);
-    recordEventWithDb(db, stream.id, "paused", stream.pausedAt!, stream.sender);
-  })();
-
-  triggerWebhook("paused", stream);
-  return stream;
-}
-
-export function resumeStream(id: string): StreamRecord {
-  const stream = getStream(id);
-  if (!stream) {
-    const err: any = new Error("Stream not found.");
-    err.statusCode = 404;
-    throw err;
-  }
-
-  if (stream.pausedAt === undefined) {
-    const err: any = new Error("Stream is not paused.");
-    err.statusCode = 400;
-    throw err;
-  }
-
-  const now = nowInSeconds();
-  const elapsed = now - stream.pausedAt;
-  stream.pausedDuration = (stream.pausedDuration ?? 0) + elapsed;
-  // Extend the effective duration so the recipient doesn't lose vesting time.
-  stream.durationSeconds += elapsed;
-  stream.pausedAt = undefined;
-
-  const db = getDb();
-  db.transaction(() => {
-    upsertStream(stream);
-    recordEventWithDb(db, stream.id, "resumed", now, stream.sender, undefined, {
-      pausedDuration: stream.pausedDuration,
-    });
-  })();
-
-  triggerWebhook("resumed", stream);
-  return stream;
-}
-
+/**
+ * Updates the start time of a scheduled stream.
+ * Only scheduled streams (not yet started) can have their start time updated.
+ * Records "start_time_updated" event.
+ * @param {string} id - Stream ID
+ * @param {number} newStartAt - New start time (Unix timestamp in seconds)
+ * @returns {StreamRecord} The updated stream record
+ * @throws {Error} If stream not found or not in scheduled state
+ */
 export function updateStreamStartAt(id: string,
   newStartAt: number,
 ): StreamRecord {
@@ -1070,6 +1116,12 @@ export function updateStreamStartAt(id: string,
 }
 
 
+/**
+ * Deletes a stream and all associated events from the database.
+ * This is a hard delete and cannot be undone.
+ * @param {string} id - Stream ID to delete
+ * @returns {boolean} True if stream was deleted, false if not found
+ */
 export function deleteStreamById(id: string): boolean {
   const db = getDb();
 

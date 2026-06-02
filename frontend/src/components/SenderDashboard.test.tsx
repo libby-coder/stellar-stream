@@ -130,6 +130,27 @@ describe("SenderDashboard", () => {
     expect(screen.getByText("Back to Dashboard")).toBeInTheDocument();
   });
 
+  it("shows CreateStreamForm when 'Create Stream' button in header is clicked", async () => {
+    const SENDER_HEADER = "GSENDER_HEADER";
+    const streams = [mockActiveStream("1", SENDER_HEADER)];
+    setupSenderHandler(streams, SENDER_HEADER);
+
+    render(<SenderDashboard senderAddress={SENDER_HEADER} onEditStartTime={onEditStartTime} />);
+
+    await waitFor(() => expect(screen.getByText("Sender Dashboard")).toBeInTheDocument());
+    
+    // Click the "Create Stream" button in the header
+    fireEvent.click(screen.getByRole("button", { name: /Create Stream/i }));
+
+    // Check if CreateStreamForm elements are present
+    expect(screen.getByText(/Recipient Account/i)).toBeInTheDocument();
+    expect(screen.getByText("Back to Dashboard")).toBeInTheDocument();
+
+    // Toggle back
+    fireEvent.click(screen.getByText("Back to Dashboard"));
+    expect(screen.queryByText(/Recipient Account/i)).not.toBeInTheDocument();
+  });
+
   it("surfaces a user-visible message on API error", async () => {
     const SENDER_ERROR = "GSENDER_ERROR";
     setupErrorHandler();
