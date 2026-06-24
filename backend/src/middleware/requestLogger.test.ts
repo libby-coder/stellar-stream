@@ -47,4 +47,45 @@ describe("requestLogger", () => {
     expect(JSON.stringify(logPayload)).not.toContain(authHeader);
     expect(JSON.stringify(logPayload).toLowerCase()).not.toContain("authorization");
   });
+
+  it("should set X-Request-ID response header", () => {
+    const req = {
+      method: "GET",
+      originalUrl: "/api/streams",
+      headers: {},
+    } as unknown as Request;
+
+    const res = new EventEmitter() as Response;
+    (res as any).statusCode = 200;
+    (res as any).setHeader = vi.fn();
+
+    const next = vi.fn();
+
+    requestLogger(req, res, next);
+    expect(next).toHaveBeenCalled();
+    expect((res as any).setHeader).toHaveBeenCalledWith("X-Request-ID", expect.any(String));
+    expect(req.requestId).toBeDefined();
+  });
+
+  it("should use existing X-Request-ID from headers", () => {
+    const existingRequestId = "existing-request-id-123";
+    const req = {
+      method: "GET",
+      originalUrl: "/api/streams",
+      headers: {
+        "x-request-id": existingRequestId,
+      },
+    } as unknown as Request;
+
+    const res = new EventEmitter() as Response;
+    (res as any).statusCode = 200;
+    (res as any).setHeader = vi.fn();
+
+    const next = vi.fn();
+
+    requestLogger(req, res, next);
+    expect(next).toHaveBeenCalled();
+    expect((res as any).setHeader).toHaveBeenCalledWith("X-Request-ID", existingRequestId);
+    expect(req.requestId).toBe(existingRequestId);
+  });
 });

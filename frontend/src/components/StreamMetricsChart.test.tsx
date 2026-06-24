@@ -1,7 +1,12 @@
 import React from "react";
 import { render, screen } from "@testing-library/react";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { StreamMetricsChart } from "./StreamMetricsChart";
+import { fetchStats } from "../services/api";
+
+vi.mock("../services/api", () => ({
+  fetchStats: vi.fn(),
+}));
 
 // Mock recharts so tests don't depend on canvas/SVG rendering
 vi.mock("recharts", () => ({
@@ -12,6 +17,10 @@ vi.mock("recharts", () => ({
     <svg data-testid="area-chart" data-points={data?.length}>{children}</svg>
   ),
   Area: ({ dataKey }: any) => <g data-testid={`area-${dataKey}`}>Area: {dataKey}</g>,
+  BarChart: ({ data, children }: any) => (
+    <svg data-testid="bar-chart" data-points={data?.length}>{children}</svg>
+  ),
+  Bar: ({ dataKey }: any) => <g data-testid={`bar-${dataKey}`}>Bar: {dataKey}</g>,
   XAxis: ({ dataKey }: any) => <g data-testid="x-axis">{dataKey}</g>,
   YAxis: () => <g data-testid="y-axis" />,
   CartesianGrid: () => <g data-testid="cartesian-grid" />,
@@ -127,5 +136,73 @@ describe("StreamMetricsChart", () => {
     expect(
       screen.getByText(/An error occurred while fetching metrics history/i),
     ).toBeInTheDocument();
+  });
+
+  describe("Stats API integration", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+    });
+
+    it("fetches stats on mount and renders bar chart", async () => {
+      const mockStats = {
+        total_streams: 42,
+        active_streams: 10,
+        completed_streams: 25,
+        canceled_streams: 7,
+        total_vested: 98432.5,
+        avg_duration_seconds: 86400,
+        unique_senders: 15,
+        unique_recipients: 20,
+      };
+      (fetchStats as any).mockResolvedValue(mockStats);
+
+      render(<StreamMetricsChart data={makeData()} />);
+
+      await vi.waitFor(() => {
+        expect(fetchStats).toHaveBeenCalled();
+      });
+
+      expect(screen.getByTestId("bar-chart")).toBeInTheDocument();
+    });
+
+    it("shows retry button on stats error", async () => {
+      (fetchStats as any).mockRejectedValue(new Error("Network error"));
+
+      render(<StreamMetricsChart data={makeData()} />);
+
+      await vi.waitFor(() => {
+        expect(screen.getByText(/Failed to Load Chart/i)).toBeInTheDocument();
+      });
+
+      expect(screen.getByText(/Retry/i)).toBeInTheDocument();
+    });
+
+    it("retries stats on button click", async () => {
+      (fetchStats as any)
+        .mockRejectedValueOnce(new Error("Network error"))
+        .mockResolvedValueOnce({
+          total_streams: 42,
+          active_streams: 10,
+          completed_streams: 25,
+          canceled_streams: 7,
+          total_vested: 98432.5,
+          avg_duration_seconds: 86400,
+          unique_senders: 15,
+          unique_recipients: 20,
+        });
+
+      render(<StreamMetricsChart data={makeData()} />);
+
+      await vi.waitFor(() => {
+        expect(screen.getByText(/Failed to Load Chart/i)).toBeInTheDocument();
+      });
+
+      const retryButton = screen.getByText(/Retry/i);
+      retryButton.click();
+
+      await vi.waitFor(() => {
+        expect(fetchStats).toHaveBeenCalledTimes(2);
+      });
+    });
   });
 });

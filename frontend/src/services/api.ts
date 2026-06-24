@@ -306,9 +306,26 @@ export async function fetchMetricsHistory(params: MetricsHistoryParams): Promise
     start: params.startTimestamp.toString(),
     end: params.endTimestamp.toString(),
   });
-  
+
   const response = await fetch(`${API_BASE}/metrics/history?${searchParams}`);
   const body = await parseResponse<{ data: any[] }>(response);
+  return body.data;
+}
+
+export interface StreamStats {
+  total_streams: number;
+  active_streams: number;
+  completed_streams: number;
+  canceled_streams: number;
+  total_vested: number;
+  avg_duration_seconds: number;
+  unique_senders: number;
+  unique_recipients: number;
+}
+
+export async function fetchStats(): Promise<StreamStats> {
+  const response = await fetch(`${API_BASE}/stats`);
+  const body = await parseResponse<{ data: StreamStats }>(response);
   return body.data;
 }
 export async function getStream(streamId: string, signal?: AbortSignal): Promise<Stream> {

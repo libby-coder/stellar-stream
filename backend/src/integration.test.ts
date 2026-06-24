@@ -237,6 +237,130 @@ describe("Backend Integration Tests", () => {
         expect(response.body.data).toHaveLength(2);
       });
 
+      it("should soft-delete stream and exclude from default list", async () => {
+        process.env.ADMIN_API_KEY = "test-admin-key";
+
+        const deleteResponse = await request(app)
+          .delete("/api/streams/1")
+          .set("X-Admin-Key", "test-admin-key");
+
+        expect(deleteResponse.status).toBe(204);
+
+        // Verify stream is not in default list
+        const listResponse = await request(app).get("/api/streams");
+        expect(listResponse.status).toBe(200);
+        expect(listResponse.body.data).toHaveLength(0);
+
+        // Verify stream appears with includeArchived=true
+        const archivedListResponse = await request(app)
+          .get("/api/streams")
+          .query({ include_archived: "true" });
+        expect(archivedListResponse.status).toBe(200);
+        expect(archivedListResponse.body.data).toHaveLength(1);
+        expect(archivedListResponse.body.data[0].id).toBe("1");
+        expect(archivedListResponse.body.data[0].archivedAt).toBeDefined();
+      });
+
+      it("should return 404 when deleting non-existent stream", async () => {
+        process.env.ADMIN_API_KEY = "test-admin-key";
+
+        const deleteResponse = await request(app)
+          .delete("/api/streams/999")
+          .set("X-Admin-Key", "test-admin-key");
+
+        expect(deleteResponse.status).toBe(404);
+        expect(deleteResponse.body.code).toBe("NOT_FOUND");
+      });
+
+      it("should return 404 when deleting already archived stream", async () => {
+        process.env.ADMIN_API_KEY = "test-admin-key";
+
+        // First delete
+        await request(app)
+          .delete("/api/streams/1")
+          .set("X-Admin-Key", "test-admin-key");
+
+        // Try to delete again
+        const deleteResponse = await request(app)
+          .delete("/api/streams/1")
+          .set("X-Admin-Key", "test-admin-key");
+
+        expect(deleteResponse.status).toBe(404);
+        expect(deleteResponse.body.code).toBe("NOT_FOUND");
+      });
+
+      it("should require admin auth for delete", async () => {
+        const deleteResponse = await request(app).delete("/api/streams/1");
+
+        expect(deleteResponse.status).toBe(401);
+      });
+
+      it("should paginate stream history with page and pageSize", async () => {
+        const db = getDb();
+        const now = Math.floor(Date.now() / 1000);
+
+        // Insert 25 events for the stream
+        for (let i = 1; i <= 25; i++) {
+          db.prepare(`
+            INSERT INTO stream_events (stream_id, event_type, timestamp, actor, amount)
+            VALUES (?, ?, ?, ?, ?)
+          `).run("1", "claimed", now - i, mockStream.sender, 100 + i);
+        }
+
+        // Request first page with pageSize 10
+        const page1Response = await request(app)
+          .get("/api/streams/1/history")
+          .query({ page: 1, pageSize: 10 });
+
+        expect(page1Response.status).toBe(200);
+        expect(page1Response.body.data).toHaveLength(10);
+        expect(page1Response.body.page).toBe(1);
+        expect(page1Response.body.pageSize).toBe(10);
+        expect(page1Response.body.total).toBe(25);
+        expect(page1Response.body.hasMore).toBe(true);
+
+        // Request second page
+        const page2Response = await request(app)
+          .get("/api/streams/1/history")
+          .query({ page: 2, pageSize: 10 });
+
+        expect(page2Response.status).toBe(200);
+        expect(page2Response.body.data).toHaveLength(10);
+        expect(page2Response.body.page).toBe(2);
+        expect(page2Response.body.hasMore).toBe(true);
+
+        // Request third page (last page with 5 items)
+        const page3Response = await request(app)
+          .get("/api/streams/1/history")
+          .query({ page: 3, pageSize: 10 });
+
+        expect(page3Response.status).toBe(200);
+        expect(page3Response.body.data).toHaveLength(5);
+        expect(page3Response.body.hasMore).toBe(false);
+
+        // Verify events are ordered by timestamp DESC (newest first)
+        const timestamps = page1Response.body.data.map((e: any) => e.timestamp);
+        for (let i = 1; i < timestamps.length; i++) {
+          expect(timestamps[i]).toBeLessThanOrEqual(timestamps[i - 1]);
+        }
+      });
+
+      it("should enforce max pageSize of 100", async () => {
+        const response = await request(app)
+          .get("/api/streams/1/history")
+          .query({ page: 1, pageSize: 200 });
+
+        expect(response.status).toBe(200);
+        expect(response.body.pageSize).toBe(100);
+      });
+
+      it("should use default pageSize of 20 when not specified", async () => {
+        const response = await request(app).get("/api/streams/1/history");
+
+        expect(response.status).toBe(200);
+        expect(response.body.pageSize).toBe(20);
+      });
+
       describe("pagination and filter combinations", () => {
         const senderA = "G" + "A".repeat(55);
         const senderB = "G" + "B".repeat(55);

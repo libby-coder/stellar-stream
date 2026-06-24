@@ -28,6 +28,7 @@ import {
 } from "./services/indexer";
 import { adminAuth } from "./middleware/adminAuth";
 import { deleteStreamById } from "./services/streamStore";
+import { getStreamStats } from "./services/stats";
 
 import { startReconciliationJob } from "./services/reconciliationJob";
 import { startWebhookWorker } from "./services/webhookWorker";
@@ -283,6 +284,11 @@ app.get("/api/health", (_req: Request, res: Response) => {
     status: "ok",
     timestamp: new Date().toISOString(),
   });
+});
+
+app.get("/api/stats", readLimiter, (_req: Request, res: Response) => {
+  const stats = getStreamStats();
+  res.json({ data: stats });
 });
 
 const METRICS_AUTH = process.env.METRICS_AUTH?.trim() || null; // format: "user:password"
@@ -1257,7 +1263,22 @@ app.patch(
 
     try {
       const updated = updateStreamStartAt(parsedId.value, parsedBody.data.startAt);
-
+      res.json({ data: updated });
+    } catch (error: any) {
+      logger.error({ err: error, streamId: parsedId.value }, "failed to update stream start time");
+      const normalizedError = normalizeUnknownApiError(
+        error,
+        "Failed to update stream start time.",
+      );
+      sendApiError(
+        req,
+        res,
+        normalizedError.statusCode,
+        normalizedError.message,
+        {
+          code: normalizedError.code ?? "INTERNAL_ERROR",
+        },
+      );
     }
   },
 );
@@ -1279,19 +1300,18 @@ app.get(
     }
 
     // Parse and validate query parameters
-    const limit = Math.min(
-      Math.max(
-        1,
-        parseInt(req.query.limit as string) || STREAM_HISTORY_DEFAULT_LIMIT,
-      ),
-      STREAM_HISTORY_MAX_LIMIT,
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const pageSize = Math.min(
+      Math.max(1, parseInt(req.query.pageSize as string) || 20),
+      100,
     );
-    const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
 
     const total = countStreamEvents(parsedId.value);
-    const data = getStreamHistory(parsedId.value, limit, offset);
+    const offset = (page - 1) * pageSize;
+    const data = getStreamHistory(parsedId.value, pageSize, offset);
+    const hasMore = offset + pageSize < total;
 
-    res.json({ data, total, limit, offset });
+    res.json({ data, total, page, pageSize, hasMore });
   },
 );
 
@@ -1532,7 +1552,7 @@ app.delete("/api/streams/:id", adminAuth, (req: Request, res: Response) => {
     const deleted = deleteStreamById(parsedId.value);
 
     if (!deleted) {
-      sendApiError(req, res, 404, "Stream not found.", { code: "NOT_FOUND" });
+      sendApiError(req, res, 404, "Stream not found or already archived.", { code: "NOT_FOUND" });
       return;
     }
 

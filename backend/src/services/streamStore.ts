@@ -1087,26 +1087,24 @@ export function updateStreamStartAt(id: string,
 
 
 /**
- * Deletes a stream and all associated events from the database.
- * This is a hard delete and cannot be undone.
- * @param {string} id - Stream ID to delete
- * @returns {boolean} True if stream was deleted, false if not found
+ * Soft-deletes a stream by setting archived_at timestamp.
+ * This preserves the stream record for audit purposes.
+ * @param {string} id - Stream ID to soft-delete
+ * @returns {boolean} True if stream was archived, false if not found or already archived
  */
 export function deleteStreamById(id: string): boolean {
   const db = getDb();
 
   const stream = db
-    .prepare("SELECT id FROM streams WHERE id = ?")
-    .get(id);
+    .prepare("SELECT id, archived_at FROM streams WHERE id = ?")
+    .get(id) as { id: string; archived_at: number | null } | undefined;
 
   if (!stream) return false;
 
-  const transaction = db.transaction(() => {
-    db.prepare("DELETE FROM event_history WHERE stream_id = ?").run(id);
-    db.prepare("DELETE FROM streams WHERE id = ?").run(id);
-  });
+  if (stream.archived_at !== null) return false;
 
-  transaction();
+  const now = nowInSeconds();
+  db.prepare("UPDATE streams SET archived_at = ? WHERE id = ?").run(now, id);
 
   return true;
 }

@@ -11,10 +11,14 @@ declare global {
 }
 
 export function requestLogger(req: Request, res: Response, next: NextFunction) {
-  const requestId = crypto.randomUUID();
+  const requestId = (req.headers["x-request-id"] as string) || crypto.randomUUID();
   req.requestId = requestId;
 
+  const requestLogger = logger.child({ requestId });
+
   const start = Date.now();
+
+  res.setHeader("X-Request-ID", requestId);
 
   res.on("finish", () => {
     const durationMs = Date.now() - start;
@@ -29,11 +33,11 @@ export function requestLogger(req: Request, res: Response, next: NextFunction) {
 
     const message = "request completed";
     if (res.statusCode >= 500) {
-      logger.error(logEntry, message);
+      requestLogger.error(logEntry, message);
     } else if (res.statusCode >= 400) {
-      logger.warn(logEntry, message);
+      requestLogger.warn(logEntry, message);
     } else {
-      logger.info(logEntry, message);
+      requestLogger.info(logEntry, message);
     }
   });
 
