@@ -49,6 +49,7 @@ import {
   listStreams,
   listStreamsByRecipient,
   listStreamsBySender,
+  markStreamComplete,
   pauseStream,
   estimateCreateStreamFee,
   refreshStreamStatuses,
@@ -1072,6 +1073,59 @@ app.post(
       const normalizedError = normalizeUnknownApiError(
         error,
         "Failed to cancel stream.",
+      );
+      sendApiError(
+        req,
+        res,
+        normalizedError.statusCode,
+        normalizedError.message,
+        {
+          code: normalizedError.code ?? "INTERNAL_ERROR",
+        },
+      );
+    }
+  },
+);
+
+// POST /api/streams/:id/mark-complete — sender marks a fully-vested stream as complete
+app.post(
+  "/api/streams/:id/mark-complete",
+  mutationLimiter,
+  authMiddleware,
+  async (req: Request, res: Response) => {
+    const parsedId = parseStreamId(req.params.id);
+    if (!parsedId.ok) {
+      sendValidationError(req, res, parsedId.issues);
+      return;
+    }
+
+    const stream = getStream(parsedId.value);
+    if (!stream) {
+      sendApiError(req, res, 404, "Stream not found.", { code: "NOT_FOUND" });
+      return;
+    }
+
+    const user = (req as any).user;
+    if (stream.sender !== user.accountId) {
+      sendApiError(req, res, 403, "Only the sender can complete this stream.", {
+        code: "FORBIDDEN",
+      });
+      return;
+    }
+
+    try {
+      const updated = markStreamComplete(parsedId.value);
+      res.json({
+        data: {
+          ...updated,
+          progress: calculateProgress(updated),
+        },
+      });
+    } catch (error: any) {
+      logger.error({ err: error, streamId: parsedId.value }, "failed to mark stream complete");
+      const normalizedError = normalizeUnknownApiError(
+        error,
+        "Failed to mark stream complete.",
       );
       sendApiError(
         req,
