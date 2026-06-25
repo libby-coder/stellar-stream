@@ -1250,7 +1250,19 @@ app.post(
       const db = (await import("./services/db")).getDb();
       const { recordEventWithDb } = await import("./services/eventHistory");
       const now = Math.floor(Date.now() / 1000);
+
+      // Guard against double-spend: check and write inside one atomic transaction.
+      let alreadyClaimed = false;
       db.transaction(() => {
+        const existing = db
+          .prepare(
+            `SELECT 1 FROM stream_events WHERE stream_id = ? AND event_type = 'claimed' LIMIT 1`,
+          )
+          .get(stream.id);
+        if (existing) {
+          alreadyClaimed = true;
+          return;
+        }
         recordEventWithDb(
           db,
           stream.id,
@@ -1261,6 +1273,13 @@ app.post(
           { assetCode: stream.assetCode },
         );
       })();
+
+      if (alreadyClaimed) {
+        sendApiError(req, res, 409, "Stream has already been claimed.", {
+          code: "ALREADY_CLAIMED",
+        });
+        return;
+      }
 
       const history = await import("./services/eventHistory").then((m) =>
         m.getStreamHistory(stream.id),
