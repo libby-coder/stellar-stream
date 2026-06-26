@@ -50,6 +50,7 @@ import {
   listStreamsByRecipient,
   listStreamsBySender,
   markStreamComplete,
+  nowInSeconds,
   pauseStream,
   estimateCreateStreamFee,
   refreshStreamStatuses,
@@ -76,6 +77,7 @@ import {
 } from "./validation/schemas";
 import { validateEnv } from "./config/validateEnv";
 import { getMetricsHistory } from "./services/metricsHistory";
+import { register } from "./services/metrics";
 import { initCache } from "./services/cache";
 import { getGlobalStats } from "./services/stats";
 import { logger } from "./logger";
@@ -347,7 +349,7 @@ app.get("/api/metrics", async (_req: Request, res: Response) => {
     }
   }
 
-  const output = await metricsRegistry.metrics();
+  const output = await register.metrics();
   res.setHeader("Content-Type", "text/plain; version=0.0.4");
   res.send(output);
 });
@@ -420,9 +422,10 @@ app.get("/api/streams", readLimiter, async (req: Request, res: Response) => {
   const hasPage = req.query.page !== undefined;
   const hasLimit = req.query.limit !== undefined;
 
+  const now = nowInSeconds();
   let data = listStreams(query.include_archived).map((stream) => ({
     ...stream,
-    progress: calculateProgress(stream),
+    progress: calculateProgress(stream, now),
   }));
 
   if (query.status) {
@@ -474,7 +477,7 @@ app.get("/api/streams", readLimiter, async (req: Request, res: Response) => {
 
   const offset = (page - 1) * limit;
   const paginatedData = data.slice(offset, offset + limit);
-  
+
   const result = {
     data: paginatedData,
     total,
@@ -549,9 +552,10 @@ app.get(
       // If cache fails, just proceed without caching
     }
 
+    const now = nowInSeconds();
     let data = listStreams(query.include_archived).map((stream) => ({
       ...stream,
-      progress: calculateProgress(stream),
+      progress: calculateProgress(stream, now),
     }));
 
     if (query.status) {
@@ -697,9 +701,10 @@ app.get(
       () => listStreamsBySender(address),
     );
 
+    const now = nowInSeconds();
     let data = rawStreams.map((stream) => ({
       ...stream,
-      progress: calculateProgress(stream),
+      progress: calculateProgress(stream, now),
     }));
 
     if (query.status) {
@@ -781,9 +786,10 @@ app.get(
       () => listStreamsByRecipient(address),
     );
 
+    const now = nowInSeconds();
     let data = rawStreams.map((stream) => ({
       ...stream,
-      progress: calculateProgress(stream),
+      progress: calculateProgress(stream, now),
     }));
 
     if (query.status) {
@@ -880,9 +886,10 @@ app.get(
     }
     const query = parsedQuery.data;
 
+    const now = nowInSeconds();
     let data = listStreamsByRecipient(accountId).map((stream) => ({
       ...stream,
-      progress: calculateProgress(stream),
+      progress: calculateProgress(stream, now),
     }));
 
     if (query.status) {
@@ -953,9 +960,10 @@ app.get(
     }
     const query = parsedQuery.data;
 
+    const now = nowInSeconds();
     let data = listStreamsBySender(accountId).map((stream) => ({
       ...stream,
-      progress: calculateProgress(stream),
+      progress: calculateProgress(stream, now),
     }));
 
     if (query.status) {

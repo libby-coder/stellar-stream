@@ -450,12 +450,13 @@ export function calculateProgress(
   stream: StreamRecord,
   at = nowInSeconds(),
 ): StreamProgress {
-  // When paused, vesting is frozen at the moment of pause.
-  const effectiveAt =
-    stream.pausedAt !== undefined ? Math.min(at, stream.pausedAt) : at;
+  const effectiveAt = stream.canceledAt !== undefined
+    ? stream.canceledAt
+    : stream.pausedAt !== undefined
+    ? Math.min(at, stream.pausedAt)
+    : at;
 
-
-
+  const elapsed = Math.max(0, Math.max(0, effectiveAt - stream.startAt) - stream.pausedDuration);
   const ratio = Math.min(1, elapsed / stream.durationSeconds);
   const vestedAmount = stream.totalAmount * ratio;
 
