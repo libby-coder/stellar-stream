@@ -28,6 +28,7 @@ import {
 } from "./services/indexer";
 import { adminAuth } from "./middleware/adminAuth";
 import { deleteStreamById } from "./services/streamStore";
+import { getStreamStats } from "./services/stats";
 
 import { startReconciliationJob } from "./services/reconciliationJob";
 import { startWebhookWorker } from "./services/webhookWorker";
@@ -1465,19 +1466,18 @@ app.get(
     }
 
     // Parse and validate query parameters
-    const limit = Math.min(
-      Math.max(
-        1,
-        parseInt(req.query.limit as string) || STREAM_HISTORY_DEFAULT_LIMIT,
-      ),
-      STREAM_HISTORY_MAX_LIMIT,
+    const page = Math.max(1, parseInt(req.query.page as string) || 1);
+    const pageSize = Math.min(
+      Math.max(1, parseInt(req.query.pageSize as string) || 20),
+      100,
     );
-    const offset = Math.max(0, parseInt(req.query.offset as string) || 0);
 
     const total = countStreamEvents(parsedId.value);
-    const data = getStreamHistory(parsedId.value, limit, offset);
+    const offset = (page - 1) * pageSize;
+    const data = getStreamHistory(parsedId.value, pageSize, offset);
+    const hasMore = offset + pageSize < total;
 
-    res.json({ data, total, limit, offset });
+    res.json({ data, total, page, pageSize, hasMore });
   },
 );
 
@@ -1518,7 +1518,7 @@ app.get(
     }
 
     const progress = calculateProgress(stream);
-    const history = getStreamHistory(parsedId.value);
+    const history = getStreamHistory(parsedId.value, 50, 0, 'asc');
 
     res.json({
       data: {
@@ -1718,7 +1718,7 @@ app.delete("/api/streams/:id", adminAuth, (req: Request, res: Response) => {
     const deleted = deleteStreamById(parsedId.value);
 
     if (!deleted) {
-      sendApiError(req, res, 404, "Stream not found.", { code: "NOT_FOUND" });
+      sendApiError(req, res, 404, "Stream not found or already archived.", { code: "NOT_FOUND" });
       return;
     }
 

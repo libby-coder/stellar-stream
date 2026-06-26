@@ -1239,6 +1239,10 @@ export async function updateStreamStartAt(id: string,
 
 
 /**
+ * Soft-deletes a stream by setting archived_at timestamp.
+ * This preserves the stream record for audit purposes.
+ * @param {string} id - Stream ID to soft-delete
+ * @returns {boolean} True if stream was archived, false if not found or already archived
  * Manually marks a fully-vested stream as completed.
  * Only callable when vestedAmount >= totalAmount.
  * Throws 400 if already completed/canceled or not fully vested.
@@ -1293,17 +1297,15 @@ export function deleteStreamById(id: string): boolean {
   const db = getDb();
 
   const stream = db
-    .prepare("SELECT id FROM streams WHERE id = ?")
-    .get(id);
+    .prepare("SELECT id, archived_at FROM streams WHERE id = ?")
+    .get(id) as { id: string; archived_at: number | null } | undefined;
 
   if (!stream) return false;
 
-  const transaction = db.transaction(() => {
-    db.prepare("DELETE FROM event_history WHERE stream_id = ?").run(id);
-    db.prepare("DELETE FROM streams WHERE id = ?").run(id);
-  });
+  if (stream.archived_at !== null) return false;
 
-  transaction();
+  const now = nowInSeconds();
+  db.prepare("UPDATE streams SET archived_at = ? WHERE id = ?").run(now, id);
 
   return true;
 }

@@ -79,11 +79,12 @@ export function recordEventWithDb(
   });
 }
 
-export function getStreamHistory(streamId: string, limit = 50, offset = 0): StreamEvent[] {
+export function getStreamHistory(streamId: string, limit = 20, offset = 0, order: 'asc' | 'desc' = 'desc'): StreamEvent[] {
   const db = getDb();
+  const orderClause = order === 'asc' ? 'ASC' : 'DESC';
   const rows = db
     .prepare(
-      `SELECT * FROM stream_events WHERE stream_id = ? ORDER BY timestamp ASC, id ASC LIMIT ? OFFSET ?`,
+      `SELECT * FROM stream_events WHERE stream_id = ? ORDER BY timestamp ${orderClause}, id ${orderClause} LIMIT ? OFFSET ?`,
     )
     .all(streamId, limit, offset) as EventRow[];
   return rows.map(rowToEvent);
